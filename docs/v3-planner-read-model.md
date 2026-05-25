@@ -180,12 +180,96 @@ step 1: Health=90 is stable; prefer observation over action
 
 This validates that the fallback planner can emit multi-step strategy while refusing to invent an action when current Sense does not justify one.
 
+## v3.2 JIT Cursor
+
+The second v3 cut activates a plan cursor without compiling actions in core:
+
+```text
+PlanDrafted
+  -> PlanActivated
+  -> StepActivated
+  -> SenseCaptured(active_step)
+  -> Brain compiles active_step + current state into GenesisAction
+  -> Act
+  -> Verify
+  -> PlanAdvanced | PlanAborted
+```
+
+Core responsibilities:
+
+- store `ActivePlan { plan_id, steps, current_index, awaiting_action_id }` in memory only.
+- inject the current `active_step` into Sense.
+- bind an accepted tactical dispatch to its `action_id`.
+- advance on `OutcomeObserved(Verified)` only when it matches the bound action.
+- abort and clear cursor on matching `Failed` or `Timeout`.
+
+Core non-responsibilities:
+
+- no intent parsing.
+- no action compilation.
+- no retry.
+- no selector repair.
+
+If an `active_step` is present, the LLM daemon must output a normal `GenesisAction`, not another plan. The core rejects PlanDraft output while a step is active.
+
+## v3.2 Smoke Evidence
+
+Setup:
+
+```bash
+GENESIS_MACRO_GOAL="Handle a drifting healing target under falling health: observe health, compile only allowlisted heal actions just in time, avoid repeating failed actions, and verify recovery through the v2 loop"
+```
+
+Observed replay:
+
+```text
+PlanDrafted plan_id=plan-1 steps=3
+StepActivated step=0 intent="Observe the current state and preserve v2 Act/Verify boundaries"
+BrainActionDecoded act-4-1 noop
+PlanAdvanced 0->1
+StepActivated step=1 intent="Candidate future action: health=50 is below threshold; consider heal control through existing Act pipeline"
+BrainActionDecoded act-6-2 click #heal-btn
+OutcomeObserved act-6-2 Verified health=90
+PlanAdvanced 1->2
+StepActivated step=2 intent="Verify that a future heal action restores health to at least 90"
+```
+
+SQLite projection:
+
+```text
+PLAN_EVENTS
+('PlanActivated', None, None, None, None)
+('StepActivated', 0, None, None, None)
+('PlanAdvanced', None, 0, 1, None)
+('StepActivated', 1, None, None, None)
+('PlanAdvanced', None, 1, 2, None)
+('StepActivated', 2, None, None, None)
+
+ACTIONS
+('act-4-1', 'noop', None, 'Verified')
+('act-6-2', 'click', '#heal-btn', 'Verified')
+```
+
 ## Non-goals
 
-- No execution cursor in `genesis-core`.
-- No `StepActivated`.
-- No automatic conversion from plan step to action.
+- No core-side intent parsing.
+- No core-side action compilation.
+- No automatic selector repair.
 - No retry policy.
 - No branching timeline.
 
-The first v3 invariant is: the Brain may draft a strategy, but only the v2 action pipeline can do work.
+The v3 invariant is: the Brain may draft a strategy and compile the current active step, but only the v2 action pipeline can do work.
+
+## v3.2 Fail-Fast Evidence
+
+The Web Arena read-only probe was used as a deliberate physical rejection point:
+
+```text
+StepActivated step=2 intent="Candidate future selector is allowlisted: a"
+BrainActionDecoded act-8-3 click a
+OutcomeObserved act-8-3 Failed failure_kind=ReadOnlyMode
+PlanAborted plan_id=plan-1 at_step=2 reason="web_failure:ReadOnlyMode:read-only mode rejected click target=a"
+PlanDrafted plan_id=plan-9
+```
+
+The aborted cursor is tied to `act-8-3`; a failure from any unrelated dispatched action cannot advance or abort that plan. After abort, the next planning pass is a new plan rather than a core-side retry.

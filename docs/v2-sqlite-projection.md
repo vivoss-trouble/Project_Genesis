@@ -39,6 +39,7 @@ python3 scripts/project_audit_sqlite.py --selftest
 - `actions`: decoded and dispatched action ledger keyed by `action_id`.
 - `plans`: v3 read-only plan drafts keyed by `plan_id`.
 - `plan_steps`: v3 plan steps keyed by `(plan_id, step_index)`.
+- `plan_events`: v3 cursor lifecycle events such as `PlanActivated`, `StepActivated`, `PlanAdvanced`, and `PlanAborted`.
 - `outcomes`: `OutcomeObserved` result, reason, `failure_kind`, policy, target, and evidence.
 - `failures`: non-action component failures.
 - `replay_snapshots`: replay anchor snapshots.

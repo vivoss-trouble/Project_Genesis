@@ -103,7 +103,7 @@ impl ActDispatcher {
         source_tick_id: u64,
         action_id: String,
         action: GenesisAction,
-    ) {
+    ) -> bool {
         let pending_action = action.clone();
         let command = ActionCommand {
             action_id: action_id.clone(),
@@ -128,6 +128,7 @@ impl ActDispatcher {
                     source_tick_id,
                     action_id,
                 });
+                true
             }
             Err(TrySendError::Full(command)) => {
                 println!(
@@ -139,6 +140,7 @@ impl ActDispatcher {
                     action_id: Some(command.action_id),
                     reason: "actuator queue full".to_string(),
                 });
+                false
             }
             Err(TrySendError::Disconnected(command)) => {
                 println!(
@@ -150,6 +152,7 @@ impl ActDispatcher {
                     action_id: Some(command.action_id),
                     reason: "actuator worker disconnected".to_string(),
                 });
+                false
             }
         }
     }

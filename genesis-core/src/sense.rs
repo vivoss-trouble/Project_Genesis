@@ -37,6 +37,14 @@ pub fn build_tick_payload(tick_id: u64, last_outcome: Option<serde_json::Value>)
 }
 
 pub fn attach_last_outcome(payload: &str, outcome: serde_json::Value) -> String {
+    attach_value(payload, "last_outcome", outcome)
+}
+
+pub fn attach_active_step(payload: &str, active_step: serde_json::Value) -> String {
+    attach_value(payload, "active_step", active_step)
+}
+
+fn attach_value(payload: &str, key: &str, value_to_attach: serde_json::Value) -> String {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(payload) else {
         return payload.to_string();
     };
@@ -44,7 +52,7 @@ pub fn attach_last_outcome(payload: &str, outcome: serde_json::Value) -> String 
         return payload.to_string();
     };
 
-    context.insert("last_outcome".to_string(), outcome);
+    context.insert(key.to_string(), value_to_attach);
     serde_json::to_string(context).unwrap_or_else(|_| payload.to_string())
 }
 

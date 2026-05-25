@@ -160,6 +160,44 @@ fn strict_audit(records: &[AuditRecord]) -> Result<(), String> {
                     }
                 }
             }
+            "PlanActivated" => {
+                println!(
+                    "[{}] tick {} plan {} activated",
+                    record.timestamp_ms,
+                    value_u64(&record.payload, "tick_id").unwrap_or_default(),
+                    value_str(&record.payload, "plan_id").unwrap_or("<no-plan-id>")
+                );
+            }
+            "StepActivated" => {
+                println!(
+                    "[{}] tick {} plan {} step {} activated intent={:?}",
+                    record.timestamp_ms,
+                    value_u64(&record.payload, "tick_id").unwrap_or_default(),
+                    value_str(&record.payload, "plan_id").unwrap_or("<no-plan-id>"),
+                    value_u64(&record.payload, "step_index").unwrap_or_default(),
+                    value_str(&record.payload, "intent").unwrap_or("")
+                );
+            }
+            "PlanAdvanced" => {
+                println!(
+                    "[{}] tick {} plan {} advanced {}->{}",
+                    record.timestamp_ms,
+                    value_u64(&record.payload, "tick_id").unwrap_or_default(),
+                    value_str(&record.payload, "plan_id").unwrap_or("<no-plan-id>"),
+                    value_u64(&record.payload, "from_step").unwrap_or_default(),
+                    value_u64(&record.payload, "to_step").unwrap_or_default()
+                );
+            }
+            "PlanAborted" => {
+                println!(
+                    "[{}] tick {} plan {} aborted at_step={} reason={:?}",
+                    record.timestamp_ms,
+                    value_u64(&record.payload, "tick_id").unwrap_or_default(),
+                    value_str(&record.payload, "plan_id").unwrap_or("<no-plan-id>"),
+                    value_u64(&record.payload, "at_step").unwrap_or_default(),
+                    value_str(&record.payload, "reason").unwrap_or("")
+                );
+            }
             "ReplaySnapshot" => {
                 println!(
                     "[{}] replay snapshot {} {}",

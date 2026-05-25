@@ -27,6 +27,20 @@ pub struct GenesisKernel {
     retired_plugins: Vec<LoadedPlugin>,
     act_dispatcher: ActDispatcher,
     auditor: AuditLogger,
+    active_plan: Option<ActivePlan>,
+}
+
+struct ActivePlan {
+    plan_id: String,
+    steps: Vec<PlanStep>,
+    current_index: usize,
+    awaiting_action_id: Option<String>,
+}
+
+enum BrainDispatch {
+    None,
+    Plan(PlanDraftEnvelope),
+    ActionDispatched(String),
 }
 
 impl GenesisKernel {
@@ -36,6 +50,7 @@ impl GenesisKernel {
             retired_plugins: Vec::new(),
             act_dispatcher: ActDispatcher::new(4, auditor.clone()),
             auditor,
+            active_plan: None,
         }
     }
 
@@ -90,9 +105,37 @@ impl GenesisKernel {
 
         let act_dispatcher = self.act_dispatcher.clone();
         let auditor = self.auditor.clone();
+        let allow_plan_draft = self.active_plan.is_none();
+        let allow_action_dispatch = self
+            .active_plan
+            .as_ref()
+            .is_none_or(|plan| plan.awaiting_action_id.is_none());
+        let mut drafted_plan = None;
+        let mut dispatched_plan_action = None;
 
         for plugin in self.plugins.values_mut() {
-            trigger_loaded_plugin(plugin, tick_id, payload, &act_dispatcher, &auditor);
+            match trigger_loaded_plugin(
+                plugin,
+                tick_id,
+                payload,
+                &act_dispatcher,
+                &auditor,
+                allow_plan_draft,
+                allow_action_dispatch,
+            ) {
+                BrainDispatch::Plan(plan) => drafted_plan = Some(plan),
+                BrainDispatch::ActionDispatched(action_id) => {
+                    dispatched_plan_action = Some(action_id);
+                }
+                BrainDispatch::None => {}
+            }
+        }
+
+        if let Some(action_id) = dispatched_plan_action {
+            self.bind_plan_action(action_id);
+        }
+        if let Some(plan) = drafted_plan {
+            self.activate_plan(tick_id, plan);
         }
     }
 
@@ -111,6 +154,9 @@ impl GenesisKernel {
             if let Some(outcome) = failed_outcome_payload(tick_id, &pending, &result, &evidence) {
                 latest_failure = Some(outcome);
             }
+            if self.action_matches_active_step(&pending.action_id) {
+                self.apply_plan_verification(tick_id, &result);
+            }
             self.auditor.log(AuditEvent::OutcomeObserved {
                 tick_id,
                 action_id: pending.action_id,
@@ -121,6 +167,138 @@ impl GenesisKernel {
             });
         }
         latest_failure
+    }
+
+    pub fn active_step_payload(&self) -> Option<serde_json::Value> {
+        let plan = self.active_plan.as_ref()?;
+        if plan.awaiting_action_id.is_some() {
+            return None;
+        }
+        let step = plan.steps.get(plan.current_index)?;
+        Some(serde_json::json!({
+            "plan_id": plan.plan_id,
+            "step_index": step.step_index,
+            "intent": step.intent,
+            "target_selector": step.target_selector,
+        }))
+    }
+
+    fn activate_plan(&mut self, tick_id: u64, plan: PlanDraftEnvelope) {
+        if plan.steps.is_empty() {
+            self.auditor.log(AuditEvent::FailureObserved {
+                tick_id,
+                component: "PlannerDecoder".to_string(),
+                error: format!("empty plan ignored: {}", plan.plan_id),
+            });
+            return;
+        }
+
+        println!(
+            "[Planner] 🧭 Tick {} activated plan {} source Tick {} goal={} steps={}",
+            tick_id,
+            plan.plan_id,
+            plan.tick,
+            plan.goal,
+            plan.steps.len()
+        );
+        self.auditor.log(AuditEvent::PlanDrafted {
+            tick_id,
+            source_tick_id: plan.tick,
+            plan_id: plan.plan_id.clone(),
+            goal: plan.goal,
+            steps: plan.steps.clone(),
+        });
+        self.active_plan = Some(ActivePlan {
+            plan_id: plan.plan_id.clone(),
+            steps: plan.steps,
+            current_index: 0,
+            awaiting_action_id: None,
+        });
+        self.auditor.log(AuditEvent::PlanActivated {
+            tick_id,
+            plan_id: plan.plan_id,
+        });
+        self.log_current_step(tick_id);
+    }
+
+    fn apply_plan_verification(&mut self, tick_id: u64, result: &VerificationResult) {
+        let Some(plan) = self.active_plan.as_ref() else {
+            return;
+        };
+        let plan_id = plan.plan_id.clone();
+        let from_step = plan.current_index as u32;
+
+        match result {
+            VerificationResult::Verified => {
+                let next_index = plan.current_index + 1;
+                self.auditor.log(AuditEvent::PlanAdvanced {
+                    tick_id,
+                    plan_id: plan_id.clone(),
+                    from_step,
+                    to_step: next_index as u32,
+                });
+
+                if next_index >= plan.steps.len() {
+                    self.active_plan = None;
+                    return;
+                }
+
+                if let Some(plan) = self.active_plan.as_mut() {
+                    plan.current_index = next_index;
+                    plan.awaiting_action_id = None;
+                }
+                self.log_current_step(tick_id);
+            }
+            VerificationResult::Failed { reason } => {
+                self.auditor.log(AuditEvent::PlanAborted {
+                    tick_id,
+                    plan_id,
+                    at_step: from_step,
+                    reason: reason.clone(),
+                });
+                self.active_plan = None;
+            }
+            VerificationResult::Timeout => {
+                self.auditor.log(AuditEvent::PlanAborted {
+                    tick_id,
+                    plan_id,
+                    at_step: from_step,
+                    reason: "verification_timeout".to_string(),
+                });
+                self.active_plan = None;
+            }
+        }
+    }
+
+    fn bind_plan_action(&mut self, action_id: String) {
+        let Some(plan) = self.active_plan.as_mut() else {
+            return;
+        };
+        if plan.awaiting_action_id.is_none() {
+            plan.awaiting_action_id = Some(action_id);
+        }
+    }
+
+    fn action_matches_active_step(&self, action_id: &str) -> bool {
+        self.active_plan
+            .as_ref()
+            .and_then(|plan| plan.awaiting_action_id.as_deref())
+            == Some(action_id)
+    }
+
+    fn log_current_step(&self, tick_id: u64) {
+        let Some(plan) = self.active_plan.as_ref() else {
+            return;
+        };
+        let Some(step) = plan.steps.get(plan.current_index) else {
+            return;
+        };
+        self.auditor.log(AuditEvent::StepActivated {
+            tick_id,
+            plan_id: plan.plan_id.clone(),
+            step_index: step.step_index,
+            intent: step.intent.clone(),
+        });
     }
 }
 
@@ -161,7 +339,9 @@ fn trigger_loaded_plugin(
     payload: &str,
     act_dispatcher: &ActDispatcher,
     auditor: &AuditLogger,
-) {
+    allow_plan_draft: bool,
+    allow_action_dispatch: bool,
+) -> BrainDispatch {
     let started_at = Instant::now();
     let response = plugin.worker.dispatch(
         tick_id,
@@ -203,7 +383,14 @@ fn trigger_loaded_plugin(
     });
 
     if plugin.name == "brain-llm" && status_code == GENESIS_STATUS_OK {
-        dispatch_brain_action(tick_id, &action_data, act_dispatcher, auditor);
+        return dispatch_brain_action(
+            tick_id,
+            &action_data,
+            act_dispatcher,
+            auditor,
+            allow_plan_draft,
+            allow_action_dispatch,
+        );
     } else if matches!(
         status_code,
         GENESIS_STATUS_REJECTED
@@ -224,6 +411,8 @@ fn trigger_loaded_plugin(
             plugin.name
         );
     }
+
+    BrainDispatch::None
 }
 
 fn dispatch_brain_action(
@@ -231,28 +420,35 @@ fn dispatch_brain_action(
     action_data: &str,
     act_dispatcher: &ActDispatcher,
     auditor: &AuditLogger,
-) {
+    allow_plan_draft: bool,
+    allow_action_dispatch: bool,
+) -> BrainDispatch {
     if let Ok(plan) = serde_json::from_str::<PlanDraftEnvelope>(action_data) {
-        println!(
-            "[Planner] 🧭 Tick {} drafted plan {} source Tick {} goal={} steps={}",
+        if allow_plan_draft {
+            return BrainDispatch::Plan(plan);
+        }
+        auditor.log(AuditEvent::FailureObserved {
             tick_id,
-            plan.plan_id,
-            plan.tick,
-            plan.goal,
-            plan.steps.len()
-        );
-        auditor.log(AuditEvent::PlanDrafted {
-            tick_id,
-            source_tick_id: plan.tick,
-            plan_id: plan.plan_id,
-            goal: plan.goal,
-            steps: plan.steps,
+            component: "PlannerDecoder".to_string(),
+            error: format!(
+                "plan draft rejected while active step is awaiting tactical action: {}",
+                plan.plan_id
+            ),
         });
-        return;
+        return BrainDispatch::None;
     }
 
     match serde_json::from_str::<BrainActionEnvelope>(action_data) {
         Ok(decision) => {
+            if !allow_action_dispatch {
+                auditor.log(AuditEvent::FailureObserved {
+                    tick_id,
+                    component: "PlannerCursor".to_string(),
+                    error: "tactical action rejected while prior step outcome is pending"
+                        .to_string(),
+                });
+                return BrainDispatch::None;
+            }
             let action_id = act_dispatcher.next_action_id(tick_id);
             println!(
                 "[Act Dispatcher] 🎯 Tick {} decoded source Tick {} action {}: {:?}",
@@ -264,7 +460,14 @@ fn dispatch_brain_action(
                 action_id: action_id.clone(),
                 action_json: action_data.to_string(),
             });
-            act_dispatcher.dispatch_reserved(tick_id, decision.tick, action_id, decision.action);
+            if act_dispatcher.dispatch_reserved(
+                tick_id,
+                decision.tick,
+                action_id.clone(),
+                decision.action,
+            ) {
+                return BrainDispatch::ActionDispatched(action_id);
+            }
         }
         Err(err) => {
             println!(
@@ -278,6 +481,8 @@ fn dispatch_brain_action(
             });
         }
     }
+
+    BrainDispatch::None
 }
 
 #[derive(Deserialize)]

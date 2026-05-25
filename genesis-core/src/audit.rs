@@ -42,6 +42,28 @@ pub enum AuditEvent {
         goal: String,
         steps: Vec<PlanStep>,
     },
+    PlanActivated {
+        tick_id: u64,
+        plan_id: String,
+    },
+    StepActivated {
+        tick_id: u64,
+        plan_id: String,
+        step_index: u32,
+        intent: String,
+    },
+    PlanAdvanced {
+        tick_id: u64,
+        plan_id: String,
+        from_step: u32,
+        to_step: u32,
+    },
+    PlanAborted {
+        tick_id: u64,
+        plan_id: String,
+        at_step: u32,
+        reason: String,
+    },
     ActionDispatched {
         tick_id: u64,
         source_tick_id: u64,

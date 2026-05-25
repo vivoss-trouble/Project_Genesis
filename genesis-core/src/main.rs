@@ -89,6 +89,9 @@ fn main() {
         if let Some(outcome) = guard.verify_pending_outcomes(tick, &payload) {
             payload = sense::attach_last_outcome(&payload, outcome);
         }
+        if let Some(active_step) = guard.active_step_payload() {
+            payload = sense::attach_active_step(&payload, active_step);
+        }
         auditor.log(AuditEvent::SenseCaptured {
             tick_id: tick,
             state_json: payload.clone(),

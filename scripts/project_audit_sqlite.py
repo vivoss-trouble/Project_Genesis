@@ -93,6 +93,18 @@ CREATE TABLE IF NOT EXISTS plan_steps (
     FOREIGN KEY(plan_id) REFERENCES plans(plan_id)
 );
 
+CREATE TABLE IF NOT EXISTS plan_events (
+    plan_id TEXT NOT NULL,
+    tick_id INTEGER NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    step_index INTEGER,
+    from_step INTEGER,
+    to_step INTEGER,
+    intent TEXT,
+    reason TEXT
+);
+
 CREATE TABLE IF NOT EXISTS outcomes (
     action_id TEXT PRIMARY KEY,
     tick_id INTEGER NOT NULL,
@@ -124,6 +136,8 @@ CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_records(event_type);
 CREATE INDEX IF NOT EXISTS idx_plugin_responses_plugin ON plugin_responses(plugin_id);
 CREATE INDEX IF NOT EXISTS idx_actions_act ON actions(act);
 CREATE INDEX IF NOT EXISTS idx_plan_steps_target ON plan_steps(target_selector);
+CREATE INDEX IF NOT EXISTS idx_plan_events_plan ON plan_events(plan_id);
+CREATE INDEX IF NOT EXISTS idx_plan_events_type ON plan_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_outcomes_status ON outcomes(status);
 CREATE INDEX IF NOT EXISTS idx_outcomes_failure_kind ON outcomes(failure_kind);
 CREATE INDEX IF NOT EXISTS idx_failures_component ON failures(component);
@@ -233,6 +247,13 @@ def project_event(
         project_brain_action(conn, timestamp_ms, payload)
     elif event_type == "PlanDrafted":
         project_plan(conn, timestamp_ms, payload)
+    elif event_type in {
+        "PlanActivated",
+        "StepActivated",
+        "PlanAdvanced",
+        "PlanAborted",
+    }:
+        project_plan_event(conn, timestamp_ms, event_type, payload)
     elif event_type == "ActionDispatched":
         conn.execute(
             """
@@ -393,6 +414,33 @@ def project_plan(
         )
 
 
+def project_plan_event(
+    conn: sqlite3.Connection,
+    timestamp_ms: int,
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO plan_events
+            (plan_id, tick_id, timestamp_ms, event_type, step_index,
+             from_step, to_step, intent, reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            payload.get("plan_id"),
+            payload.get("tick_id"),
+            timestamp_ms,
+            event_type,
+            payload.get("step_index"),
+            payload.get("from_step"),
+            payload.get("to_step"),
+            payload.get("intent"),
+            payload.get("reason"),
+        ),
+    )
+
+
 def project_outcome(
     conn: sqlite3.Connection, timestamp_ms: int, payload: dict[str, Any]
 ) -> None:
@@ -505,6 +553,21 @@ def run_selftest() -> None:
             },
         },
         {
+            "timestamp_ms": 7,
+            "type": "PlanActivated",
+            "payload": {"tick_id": 3, "plan_id": "plan-2"},
+        },
+        {
+            "timestamp_ms": 8,
+            "type": "StepActivated",
+            "payload": {
+                "tick_id": 3,
+                "plan_id": "plan-2",
+                "step_index": 0,
+                "intent": "observe web title",
+            },
+        },
+        {
             "timestamp_ms": 5,
             "type": "OutcomeObserved",
             "payload": {
@@ -546,6 +609,9 @@ def run_selftest() -> None:
         step = conn.execute(
             "SELECT intent FROM plan_steps WHERE plan_id='plan-2' AND step_index=0"
         ).fetchone()
+        event = conn.execute(
+            "SELECT event_type, step_index FROM plan_events WHERE plan_id='plan-2' AND event_type='StepActivated'"
+        ).fetchone()
         conn.close()
 
     assert count == len(records)
@@ -553,6 +619,7 @@ def run_selftest() -> None:
     assert sense == ("Failed",)
     assert plan == ("inspect web state",)
     assert step == ("observe web title",)
+    assert event == ("StepActivated", 0)
     print("[audit-sqlite] selftest passed")
 
 

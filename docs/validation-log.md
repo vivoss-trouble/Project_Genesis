@@ -308,3 +308,57 @@ SQLite projects both rows into plan_steps
 ```
 
 结论：**PASS.** v3 第一刀只建立 Planner Read Model；核心没有执行 cursor，没有 `StepActivated`，没有自动动作派发。
+
+## v3 JIT Cursor 冒烟验收
+
+目标：验证计划游标只注入 `active_step`，由 Brain 基于最新 Sense 即时编译动作，并继续通过 v2 Act/Verify 闭环。
+
+关键观测：
+
+```text
+PlanDrafted plan_id=plan-1 steps=3
+PlanActivated plan_id=plan-1
+StepActivated step=0
+BrainActionDecoded act-4-1 noop
+OutcomeObserved act-4-1 Verified
+PlanAdvanced 0->1
+StepActivated step=1
+BrainActionDecoded act-6-2 click #heal-btn
+OutcomeObserved act-6-2 Verified health=90
+PlanAdvanced 1->2
+StepActivated step=2
+```
+
+SQLite 投影：
+
+```text
+PLAN_EVENTS:
+('PlanActivated', None, None, None, None)
+('StepActivated', 0, None, None, None)
+('PlanAdvanced', None, 0, 1, None)
+('StepActivated', 1, None, None, None)
+('PlanAdvanced', None, 1, 2, None)
+('StepActivated', 2, None, None, None)
+
+ACTIONS:
+('act-4-1', 'noop', None, 'Verified')
+('act-6-2', 'click', '#heal-btn', 'Verified')
+```
+
+结论：**PASS.** 核心维护游标但不编译动作；Brain 只在 `active_step` 上即时生成标准 `GenesisAction`，执行仍受 v2 安全链约束。
+
+### v3 JIT Cursor 失败即中止验收
+
+目标：验证游标只接收当前步骤绑定的 `action_id` 结果，并在物理执行层拒绝动作时立即终止计划。
+
+环境：Web Arena 运行在只读 HTTP Probe 模式，`a` 同时通过 Planner/Purifier allowlist，但执行层拒绝点击。
+
+```text
+StepActivated step=2 intent="Candidate future selector is allowlisted: a"
+BrainActionDecoded act-8-3 click a
+OutcomeObserved act-8-3 Failed failure_kind=ReadOnlyMode
+PlanAborted plan_id=plan-1 at_step=2 reason="web_failure:ReadOnlyMode:read-only mode rejected click target=a"
+PlanDrafted plan_id=plan-9
+```
+
+结论：**PASS.** `PlanAborted` 与被拒绝的 `act-8-3` 精确关联；核心没有机械重试，而是在清空污染游标后允许下一次全局重新规划。

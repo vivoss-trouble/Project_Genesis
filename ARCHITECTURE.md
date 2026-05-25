@@ -131,6 +131,37 @@ PlanDraft JSON -> PlanDrafted audit event -> SQLite plans/plan_steps projection
 
 它不维护 `step_index` 游标，不激活步骤，不把 Plan 自动转换为 `GenesisAction`。这保证 v3 的大脑可以写作战图，但不能绕过 v2 的 `Act -> Verify -> Audit` 物理链路。
 
+## v3 第二刀：JIT 意图动态编译
+
+v3.2 允许核心维护一个极轻量的 `ActivePlan` 游标，但不允许核心解释意图或编译动作。
+
+```text
+ActivePlan { plan_id, steps, current_index, awaiting_action_id }
+```
+
+当前步骤会被注入 Sense：
+
+```json
+{
+  "active_step": {
+    "plan_id": "plan-1",
+    "step_index": 1,
+    "intent": "Candidate future action: health=50 is below threshold",
+    "target_selector": "#heal-btn"
+  }
+}
+```
+
+Brain daemon 看到 `active_step` 时必须降维为战术编译器，输出标准 `GenesisAction`。如果它试图在 active step 期间输出新的 PlanDraft，核心会拒绝并记录 `FailureObserved`。
+
+游标推进规则：
+
+- 只有当前步骤实际派发并登记的 `awaiting_action_id` 所对应的结果，才有资格修改游标。
+- `Verified`：`PlanAdvanced`，进入下一步。
+- `Failed` / `Timeout`：`PlanAborted`，清空游标，等待重新规划。
+
+核心仍然不做 retry、不解释 DOM、不修复 selector。
+
 ## 终极回路
 
 ```text

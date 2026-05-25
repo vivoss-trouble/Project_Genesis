@@ -126,6 +126,10 @@ def read_line(conn: socket.socket) -> str:
 def fallback_action(
     request: dict[str, Any], payload: dict[str, Any], reason: str | None = None
 ) -> dict[str, Any]:
+    active_step = payload.get("active_step")
+    if isinstance(active_step, dict):
+        return fallback_step_action(request, payload, active_step, reason)
+
     macro_goal = payload.get("macro_goal")
     if isinstance(macro_goal, str) and macro_goal.strip():
         return fallback_plan(request, payload, macro_goal, reason)
@@ -209,6 +213,8 @@ def system_prompt() -> str:
         '{"tick":1,"plan_id":"plan-1","goal":"goal text","steps":['
         '{"step_index":0,"intent":"observe current state","target_selector":null}]}. '
         "Plans are for audit only and must not assume execution. "
+        "If the state contains active_step, return a normal GenesisAction for that step, "
+        "not a plan. Compile active_step.intent against the current state only. "
         "No markdown, no commentary, no extra text. "
         "If the state contains last_outcome with status Failed, the previous action did not "
         "produce the expected physical effect. Use its evidence to re-evaluate the current "
@@ -237,6 +243,11 @@ def purify_action(
     if not isinstance(candidate, dict):
         return None, "action is not a JSON object"
 
+    if contains_active_step(payload):
+        if "steps" in candidate or "plan_id" in candidate:
+            return None, "active_step expects action, not plan"
+        return normalize_action(candidate, request, payload)
+
     if contains_macro_goal(payload) or "steps" in candidate or "plan_id" in candidate:
         return normalize_plan(candidate, request, payload)
 
@@ -246,6 +257,59 @@ def purify_action(
 def contains_macro_goal(payload: dict[str, Any]) -> bool:
     goal = payload.get("macro_goal")
     return isinstance(goal, str) and bool(goal.strip())
+
+
+def contains_active_step(payload: dict[str, Any]) -> bool:
+    return isinstance(payload.get("active_step"), dict)
+
+
+def fallback_step_action(
+    request: dict[str, Any],
+    payload: dict[str, Any],
+    active_step: dict[str, Any],
+    reason: str | None = None,
+) -> dict[str, Any]:
+    tick = safe_int(request.get("tick_id"), 0)
+    intent = clamp_text(str(active_step.get("intent") or "active step"), MAX_REASON_LEN)
+    target = active_step.get("target_selector")
+    if not isinstance(target, str) or target not in ALLOWED_CLICK_TARGETS:
+        return {
+            "tick": tick,
+            "act": "noop",
+            "reason": clamp_text(
+                reason or f"active_step observation only: {intent}", MAX_REASON_LEN
+            ),
+        }
+
+    fantasy_state = payload.get("fantasy_state")
+    if target == "#heal-btn" and isinstance(fantasy_state, dict):
+        health = safe_int(fantasy_state.get("health"), 100)
+        if health <= 65:
+            return {
+                "tick": tick,
+                "act": "click",
+                "target": target,
+                "reason": clamp_text(f"active_step compiled: {intent}", MAX_REASON_LEN),
+            }
+
+    web_state = payload.get("web_state")
+    if isinstance(web_state, dict) and os.environ.get("GENESIS_WEB_FALLBACK_CLICK") == "1":
+        allowed = web_state.get("allowed_click_selectors") or []
+        if isinstance(allowed, list) and target in allowed:
+            return {
+                "tick": tick,
+                "act": "click",
+                "target": target,
+                "reason": clamp_text(f"active_step compiled: {intent}", MAX_REASON_LEN),
+            }
+
+    return {
+        "tick": tick,
+        "act": "noop",
+        "reason": clamp_text(
+            reason or f"active_step did not justify action: {intent}", MAX_REASON_LEN
+        ),
+    }
 
 
 def fallback_plan(
@@ -686,6 +750,34 @@ def run_selftest() -> None:
     )
     assert invalid_plan is None
     assert error == "plan target not allowed: #evil"
+
+    active_payload = {
+        "macro_goal": "heal the system without unsafe actions",
+        "active_step": {
+            "plan_id": "plan-7",
+            "step_index": 1,
+            "intent": "compile heal action only if health is low",
+            "target_selector": "#heal-btn",
+        },
+        "fantasy_state": {"health": 40},
+    }
+    active_action = fallback_action(request, active_payload)
+    assert active_action["act"] == "click"
+    assert active_action["target"] == "#heal-btn"
+    rejected_plan, error = purify_action(
+        json.dumps(
+            {
+                "tick": 7,
+                "plan_id": "plan-should-not-appear",
+                "goal": "bad mode",
+                "steps": [{"step_index": 0, "intent": "bad", "target_selector": None}],
+            }
+        ),
+        request,
+        active_payload,
+    )
+    assert rejected_plan is None
+    assert error == "active_step expects action, not plan"
 
     failed_payload = {
         "fantasy_state": {"health": 40},
