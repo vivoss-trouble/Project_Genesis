@@ -1,0 +1,470 @@
+#!/usr/bin/env python3
+"""
+Project Genesis audit JSONL into a queryable SQLite database.
+
+JSONL remains the append-only source of truth. This script builds a disposable
+read model for analysis, dashboards, and release validation.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+import tempfile
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_AUDIT = ".genesis-state/audit.jsonl"
+DEFAULT_DB = ".genesis-state/audit.sqlite"
+
+
+SCHEMA = """
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+
+CREATE TABLE IF NOT EXISTS audit_records (
+    source_path TEXT NOT NULL,
+    line_no INTEGER NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    raw_json TEXT NOT NULL,
+    PRIMARY KEY (source_path, line_no)
+);
+
+CREATE TABLE IF NOT EXISTS ticks (
+    tick_id INTEGER PRIMARY KEY,
+    timestamp_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS senses (
+    tick_id INTEGER PRIMARY KEY,
+    timestamp_ms INTEGER NOT NULL,
+    sense_key TEXT,
+    health INTEGER,
+    web_title TEXT,
+    web_mode TEXT,
+    last_outcome_action_id TEXT,
+    last_outcome_status TEXT,
+    state_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS plugin_responses (
+    tick_id INTEGER NOT NULL,
+    plugin_id TEXT NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    status INTEGER,
+    error_code INTEGER,
+    latency_ms INTEGER,
+    data_hash TEXT,
+    data_preview TEXT,
+    PRIMARY KEY (tick_id, plugin_id)
+);
+
+CREATE TABLE IF NOT EXISTS actions (
+    action_id TEXT PRIMARY KEY,
+    decoded_tick_id INTEGER,
+    source_tick_id INTEGER,
+    dispatched_tick_id INTEGER,
+    decoded_timestamp_ms INTEGER,
+    dispatched_timestamp_ms INTEGER,
+    action_json TEXT,
+    act TEXT,
+    target TEXT,
+    reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS outcomes (
+    action_id TEXT PRIMARY KEY,
+    tick_id INTEGER NOT NULL,
+    source_tick_id INTEGER,
+    dispatched_tick_id INTEGER,
+    timestamp_ms INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT,
+    failure_kind TEXT,
+    policy TEXT,
+    target TEXT,
+    evidence_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS failures (
+    tick_id INTEGER,
+    timestamp_ms INTEGER NOT NULL,
+    component TEXT NOT NULL,
+    error TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS replay_snapshots (
+    timestamp_ms INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    path TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_records(event_type);
+CREATE INDEX IF NOT EXISTS idx_plugin_responses_plugin ON plugin_responses(plugin_id);
+CREATE INDEX IF NOT EXISTS idx_actions_act ON actions(act);
+CREATE INDEX IF NOT EXISTS idx_outcomes_status ON outcomes(status);
+CREATE INDEX IF NOT EXISTS idx_outcomes_failure_kind ON outcomes(failure_kind);
+CREATE INDEX IF NOT EXISTS idx_failures_component ON failures(component);
+"""
+
+
+def main() -> None:
+    args = parse_args()
+    if args.selftest:
+        run_selftest()
+        return
+
+    audit_path = Path(args.audit)
+    db_path = Path(args.db)
+    if args.rebuild and db_path.exists():
+        db_path.unlink()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    count = project(audit_path, db_path)
+    print(f"[audit-sqlite] projected {count} records into {db_path}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Project Genesis audit JSONL into SQLite."
+    )
+    parser.add_argument("--audit", default=DEFAULT_AUDIT, help="path to audit.jsonl")
+    parser.add_argument("--db", default=DEFAULT_DB, help="path to SQLite database")
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="delete the database before projecting",
+    )
+    parser.add_argument(
+        "--selftest",
+        action="store_true",
+        help="run a small in-memory projection test",
+    )
+    return parser.parse_args()
+
+
+def project(audit_path: Path, db_path: Path) -> int:
+    if not audit_path.exists():
+        raise SystemExit(f"audit path does not exist: {audit_path}")
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(SCHEMA)
+
+    source_path = str(audit_path)
+    count = 0
+    with audit_path.open("r", encoding="utf-8") as file:
+        for line_no, line in enumerate(file, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            timestamp_ms = int(record.get("timestamp_ms") or 0)
+            event_type = str(record.get("type") or "")
+            payload = record.get("payload") or {}
+            payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO audit_records
+                    (source_path, line_no, timestamp_ms, event_type, payload_json, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (source_path, line_no, timestamp_ms, event_type, payload_json, line),
+            )
+            project_event(conn, timestamp_ms, event_type, payload)
+            count += 1
+
+    conn.commit()
+    conn.close()
+    return count
+
+
+def project_event(
+    conn: sqlite3.Connection, timestamp_ms: int, event_type: str, payload: dict[str, Any]
+) -> None:
+    if event_type == "TickStarted":
+        conn.execute(
+            "INSERT OR REPLACE INTO ticks (tick_id, timestamp_ms) VALUES (?, ?)",
+            (payload.get("tick_id"), timestamp_ms),
+        )
+    elif event_type == "SenseCaptured":
+        project_sense(conn, timestamp_ms, payload)
+    elif event_type == "PluginResponded":
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO plugin_responses
+                (tick_id, plugin_id, timestamp_ms, status, error_code, latency_ms, data_hash, data_preview)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload.get("tick_id"),
+                payload.get("plugin_id"),
+                timestamp_ms,
+                payload.get("status"),
+                payload.get("error_code"),
+                payload.get("latency_ms"),
+                stringify_optional(payload.get("data_hash")),
+                payload.get("data_preview"),
+            ),
+        )
+    elif event_type == "BrainActionDecoded":
+        project_brain_action(conn, timestamp_ms, payload)
+    elif event_type == "ActionDispatched":
+        conn.execute(
+            """
+            INSERT INTO actions (action_id, source_tick_id, dispatched_tick_id, dispatched_timestamp_ms)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(action_id) DO UPDATE SET
+                source_tick_id=excluded.source_tick_id,
+                dispatched_tick_id=excluded.dispatched_tick_id,
+                dispatched_timestamp_ms=excluded.dispatched_timestamp_ms
+            """,
+            (
+                payload.get("action_id"),
+                payload.get("source_tick_id"),
+                payload.get("tick_id"),
+                timestamp_ms,
+            ),
+        )
+    elif event_type == "OutcomeObserved":
+        project_outcome(conn, timestamp_ms, payload)
+    elif event_type == "FailureObserved":
+        conn.execute(
+            """
+            INSERT INTO failures (tick_id, timestamp_ms, component, error)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                payload.get("tick_id"),
+                timestamp_ms,
+                payload.get("component"),
+                payload.get("error"),
+            ),
+        )
+    elif event_type == "ReplaySnapshot":
+        conn.execute(
+            """
+            INSERT INTO replay_snapshots (timestamp_ms, label, path)
+            VALUES (?, ?, ?)
+            """,
+            (timestamp_ms, payload.get("label"), payload.get("path")),
+        )
+
+
+def project_sense(
+    conn: sqlite3.Connection, timestamp_ms: int, payload: dict[str, Any]
+) -> None:
+    state_json = str(payload.get("state_json") or "{}")
+    try:
+        state = json.loads(state_json)
+    except json.JSONDecodeError:
+        state = {}
+
+    fantasy_state = state.get("fantasy_state") if isinstance(state, dict) else None
+    web_state = state.get("web_state") if isinstance(state, dict) else None
+    last_outcome = state.get("last_outcome") if isinstance(state, dict) else None
+
+    sense_key = None
+    if isinstance(fantasy_state, dict):
+        sense_key = "fantasy_state"
+    elif isinstance(web_state, dict):
+        sense_key = "web_state"
+
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO senses
+            (tick_id, timestamp_ms, sense_key, health, web_title, web_mode,
+             last_outcome_action_id, last_outcome_status, state_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            payload.get("tick_id"),
+            timestamp_ms,
+            sense_key,
+            fantasy_state.get("health") if isinstance(fantasy_state, dict) else None,
+            web_state.get("title") if isinstance(web_state, dict) else None,
+            web_state.get("mode") if isinstance(web_state, dict) else None,
+            last_outcome.get("action_id") if isinstance(last_outcome, dict) else None,
+            last_outcome.get("status") if isinstance(last_outcome, dict) else None,
+            state_json,
+        ),
+    )
+
+
+def project_brain_action(
+    conn: sqlite3.Connection, timestamp_ms: int, payload: dict[str, Any]
+) -> None:
+    action_json = str(payload.get("action_json") or "{}")
+    action = parse_json_obj(action_json)
+    conn.execute(
+        """
+        INSERT INTO actions
+            (action_id, decoded_tick_id, source_tick_id, decoded_timestamp_ms,
+             action_json, act, target, reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(action_id) DO UPDATE SET
+            decoded_tick_id=excluded.decoded_tick_id,
+            source_tick_id=excluded.source_tick_id,
+            decoded_timestamp_ms=excluded.decoded_timestamp_ms,
+            action_json=excluded.action_json,
+            act=excluded.act,
+            target=excluded.target,
+            reason=excluded.reason
+        """,
+        (
+            payload.get("action_id"),
+            payload.get("tick_id"),
+            payload.get("source_tick_id"),
+            timestamp_ms,
+            action_json,
+            action.get("act"),
+            action.get("target"),
+            action.get("reason"),
+        ),
+    )
+
+
+def project_outcome(
+    conn: sqlite3.Connection, timestamp_ms: int, payload: dict[str, Any]
+) -> None:
+    result = payload.get("result") or {}
+    evidence = payload.get("evidence") or {}
+    status = result.get("status") if isinstance(result, dict) else None
+    detail = result.get("detail") if isinstance(result, dict) else None
+    reason = detail.get("reason") if isinstance(detail, dict) else None
+
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO outcomes
+            (action_id, tick_id, source_tick_id, dispatched_tick_id, timestamp_ms,
+             status, reason, failure_kind, policy, target, evidence_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            payload.get("action_id"),
+            payload.get("tick_id"),
+            payload.get("source_tick_id"),
+            payload.get("dispatched_tick_id"),
+            timestamp_ms,
+            status,
+            reason,
+            evidence.get("failure_kind") if isinstance(evidence, dict) else None,
+            evidence.get("policy") if isinstance(evidence, dict) else None,
+            evidence.get("target") if isinstance(evidence, dict) else None,
+            json.dumps(evidence, ensure_ascii=False, sort_keys=True),
+        ),
+    )
+
+
+def parse_json_obj(raw: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def stringify_optional(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def run_selftest() -> None:
+    records = [
+        {
+            "timestamp_ms": 1,
+            "type": "TickStarted",
+            "payload": {"tick_id": 1},
+        },
+        {
+            "timestamp_ms": 2,
+            "type": "SenseCaptured",
+            "payload": {
+                "tick_id": 2,
+                "state_json": json.dumps(
+                    {
+                        "tick_id": 2,
+                        "web_state": {
+                            "title": "Example Domain",
+                            "mode": "http_probe",
+                        },
+                        "last_outcome": {
+                            "status": "Failed",
+                            "action_id": "act-1-1",
+                        },
+                    }
+                ),
+            },
+        },
+        {
+            "timestamp_ms": 3,
+            "type": "BrainActionDecoded",
+            "payload": {
+                "tick_id": 1,
+                "source_tick_id": 1,
+                "action_id": "act-1-1",
+                "action_json": json.dumps(
+                    {"tick": 1, "act": "click", "target": "a", "reason": "test"}
+                ),
+            },
+        },
+        {
+            "timestamp_ms": 4,
+            "type": "ActionDispatched",
+            "payload": {
+                "tick_id": 1,
+                "source_tick_id": 1,
+                "action_id": "act-1-1",
+            },
+        },
+        {
+            "timestamp_ms": 5,
+            "type": "OutcomeObserved",
+            "payload": {
+                "tick_id": 2,
+                "source_tick_id": 1,
+                "dispatched_tick_id": 1,
+                "action_id": "act-1-1",
+                "result": {
+                    "status": "Failed",
+                    "detail": {"reason": "web_failure:ReadOnlyMode:test"},
+                },
+                "evidence": {
+                    "policy": "web_last_action_matches",
+                    "failure_kind": "ReadOnlyMode",
+                    "target": "a",
+                },
+            },
+        },
+    ]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        audit = Path(tmp) / "audit.jsonl"
+        db = Path(tmp) / "audit.sqlite"
+        with audit.open("w", encoding="utf-8") as file:
+            for record in records:
+                file.write(json.dumps(record) + "\n")
+
+        count = project(audit, db)
+        conn = sqlite3.connect(db)
+        outcome = conn.execute(
+            "SELECT status, failure_kind FROM outcomes WHERE action_id='act-1-1'"
+        ).fetchone()
+        sense = conn.execute(
+            "SELECT last_outcome_status FROM senses WHERE tick_id=2"
+        ).fetchone()
+        conn.close()
+
+    assert count == len(records)
+    assert outcome == ("Failed", "ReadOnlyMode")
+    assert sense == ("Failed",)
+    print("[audit-sqlite] selftest passed")
+
+
+if __name__ == "__main__":
+    main()

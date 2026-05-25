@@ -1,0 +1,16 @@
+# genesis-core/Cargo.toml
+[package]
+name = "genesis-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# 【物理撕裂者】用于打破系统边界，强行加载 .dylib 动态库
+libloading = "0.8"
+# 监视文件系统变动的物理触角
+notify = "6.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# 【思想钢印】将我们写的神圣契约注入微核的脑干
+genesis-contracts = { path = "../genesis-contracts" }

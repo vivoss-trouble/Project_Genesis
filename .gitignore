@@ -1,0 +1,26 @@
+.DS_Store
+
+# Build output
+/target/
+**/target/
+
+# Local Python environments and caches
+/.venv-llm/
+/.token-counter/
+__pycache__/
+*.py[cod]
+
+# Runtime state and generated replay artifacts
+/.genesis-state/
+/.genesis-state-replay/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Hot-loaded plugin binaries are rebuilt from source.
+/genesis-plugins/*.dylib
+/genesis-plugins/*.so
+
+# Nested repositories are historical scaffolding; the root release commit owns
+# the source files, not their inner Git metadata.
+**/.git/

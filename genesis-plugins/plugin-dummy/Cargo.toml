@@ -1,0 +1,12 @@
+[package]
+name = "plugin-dummy"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+# 强制让编译产物直接出现在微核的监控区！
+path = "src/lib.rs"
+
+[dependencies]
+genesis-contracts = { path = "../../genesis-contracts" }
