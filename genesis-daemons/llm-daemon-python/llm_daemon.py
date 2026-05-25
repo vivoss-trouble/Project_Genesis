@@ -348,6 +348,7 @@ def infer_action(
         f"{system_prompt()}\n"
         f"Current tick: {request.get('tick_id')}\n"
         f"System state JSON: {json.dumps(payload, ensure_ascii=False)}\n"
+        f"{context_rules(payload)}"
         f"{advisory_panel}"
         "Action JSON:"
     )
@@ -374,6 +375,10 @@ def system_prompt() -> str:
         'For dynamic_state active steps, you may return {"tick":1,"act":"click_point",'
         '"target_id":"heal","x":312.0,"y":188.0,"frame_id":1842,'
         '"reason":"target visible in committed frame"}. '
+        "For dynamic_state, target_selector and click_point.target_id must use raw "
+        "arena target IDs from dynamic_state.targets[].id, e.g. \"heal\"; never CSS "
+        "selectors such as \"#heal\". CSS selector syntax only applies to web/fantasy "
+        "click and wait targets. "
         "If the state contains macro_goal, return a read-only plan draft instead: "
         '{"tick":1,"plan_id":"plan-1","goal":"goal text","steps":['
         '{"step_index":0,"intent":"observe current state","target_selector":null}]}. '
@@ -392,6 +397,27 @@ def system_prompt() -> str:
         f"Wait is verified on the next tick, must use ms <= {MAX_WAIT_MS}, and may only "
         f"observe these selectors: {wait_selectors}."
     )
+
+
+def context_rules(payload: dict[str, Any]) -> str:
+    dynamic_state = payload.get("dynamic_state")
+    if not isinstance(dynamic_state, dict):
+        return ""
+
+    target_ids = dynamic_target_ids(dynamic_state)
+    if not target_ids:
+        return ""
+
+    allowed_ids = [target_id for target_id in target_ids if target_id in ALLOWED_CLICK_TARGETS]
+    return (
+        "Dynamic Target ID Rules:\n"
+        "- dynamic_state.targets[].id values are raw arena IDs, not CSS selectors.\n"
+        f"- Current raw target IDs: {', '.join(target_ids)}.\n"
+        f"- Allowlisted raw IDs for plan target_selector and click_point.target_id: "
+        f"{', '.join(allowed_ids) or '<none>'}.\n"
+        "- Never prefix dynamic target IDs with '#'; '#heal' is invalid when the raw ID is 'heal'.\n"
+    )
+
 
 def read_memory_advisory(
     payload: dict[str, Any],
@@ -1177,16 +1203,30 @@ def dynamic_control_click_point(state: dict[str, Any], target_id: str) -> dict[s
 
 
 def first_dynamic_target_id(dynamic_state: dict[str, Any]) -> str | None:
+    for target_id in dynamic_target_ids(dynamic_state):
+        if target_id in ALLOWED_CLICK_TARGETS:
+            return target_id
+    return None
+
+
+def dynamic_target_ids(dynamic_state: dict[str, Any]) -> list[str]:
     targets = dynamic_state.get("targets")
     if not isinstance(targets, list):
-        return None
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
     for target in targets:
         if not isinstance(target, dict):
             continue
         target_id = target.get("id")
-        if isinstance(target_id, str) and target_id in ALLOWED_CLICK_TARGETS:
-            return target_id
-    return None
+        if not isinstance(target_id, str):
+            continue
+        target_id = target_id.strip()
+        if not target_id or len(target_id) > TARGET_ID_MAX_LEN or target_id in seen:
+            continue
+        result.append(target_id)
+        seen.add(target_id)
+    return result
 
 
 def fallback_dynamic_click_point(
@@ -1351,6 +1391,22 @@ def run_selftest() -> None:
     )
     assert invalid_plan is None
     assert error == "plan target not allowed: #evil"
+
+    dynamic_rules_payload = {
+        "dynamic_state": {
+            "frame_id": 42,
+            "targets": [{"id": "heal", "x": 10, "y": 20, "w": 30, "h": 10}],
+        }
+    }
+    had_heal_target = "heal" in ALLOWED_CLICK_TARGETS
+    ALLOWED_CLICK_TARGETS.add("heal")
+    try:
+        rules = context_rules(dynamic_rules_payload)
+    finally:
+        if not had_heal_target:
+            ALLOWED_CLICK_TARGETS.discard("heal")
+    assert "Current raw target IDs: heal" in rules
+    assert "Never prefix dynamic target IDs with '#'" in rules
 
     active_payload = {
         "macro_goal": "heal the system without unsafe actions",
