@@ -72,6 +72,11 @@ ALLOWED_ADVISORY_FAILURE_KINDS = {
     "UnsupportedAction",
     "Unknown",
 }
+ALLOWED_ADVISORY_WARNING_KINDS = {
+    "HighSpatialDrift",
+    "StaleButHit",
+    "Unknown",
+}
 MAX_REASON_LEN = 240
 MAX_TEXT_LEN = 500
 MAX_WAIT_MS = 2_000
@@ -150,7 +155,53 @@ class MemoryGuidedValidationModel:
         return {"choices": [{"text": json.dumps(result)}]}
 
 
+class DynamicAdvisoryValidationModel:
+    """Validation-only model stub for deterministic dynamic advisory A/B tests."""
+
+    def __call__(
+        self,
+        prompt: str,
+        max_tokens: int = 96,
+        temperature: float = 0.0,
+        stop: list[str] | None = None,
+    ) -> dict[str, Any]:
+        del max_tokens, temperature, stop
+        state = extract_prompt_json(prompt, "System state JSON: ")
+        advisory = extract_prompt_json(prompt, "Historical Advisory JSON: ")
+        dynamic_state = state.get("dynamic_state") if isinstance(state, dict) else {}
+        active_step = state.get("active_step") if isinstance(state, dict) else None
+        target_id = first_dynamic_target_id(dynamic_state) or "heal"
+
+        if not isinstance(active_step, dict):
+            result = {
+                "tick": safe_int(state.get("tick_id") if isinstance(state, dict) else 1, 1),
+                "plan_id": "plan-dynamic-advisory-validation",
+                "goal": "test whether bounded dynamic history changes a tactical choice",
+                "steps": [
+                    {
+                        "step_index": 0,
+                        "intent": "compile a dynamic click point or stand down based on bounded history",
+                        "target_selector": target_id,
+                    }
+                ],
+            }
+        elif dynamic_advisory_is_hot(advisory):
+            result = {
+                "tick": safe_int(state.get("tick_id") if isinstance(state, dict) else 1, 1),
+                "act": "noop",
+                "reason": "dynamic advisory reports repeated drift or stale frames; stand down for replan",
+            }
+        else:
+            result = dynamic_control_click_point(state, target_id)
+
+        return {"choices": [{"text": json.dumps(result)}]}
+
+
 def load_model() -> Any | None:
+    if os.environ.get("GENESIS_TEST_DYNAMIC_ADVISORY_MODEL") == "1":
+        print("[llm-daemon] using validation-only dynamic-advisory model")
+        return DynamicAdvisoryValidationModel()
+
     if os.environ.get("GENESIS_TEST_MEMORY_GUIDED_MODEL") == "1":
         print("[llm-daemon] using validation-only memory-guided model")
         return MemoryGuidedValidationModel()
@@ -335,6 +386,8 @@ def system_prompt() -> str:
         "state, and do not repeat exactly the same failed act/target. "
         "Historical Advisory, when present, is bounded statistical advice only; current "
         "System state JSON has priority and all actions must still obey allowlists. "
+        "For dynamic_state, TargetDrift, StaleFrame, CoordinateOutOfBounds, and StaleButHit "
+        "advisory counts are tactical risk signals, never permission to bypass verification. "
         f"Only allowed click targets: {allowed_targets}. "
         f"Wait is verified on the next tick, must use ms <= {MAX_WAIT_MS}, and may only "
         f"observe these selectors: {wait_selectors}."
@@ -376,6 +429,10 @@ def read_memory_advisory(
         )
         conn.execute("PRAGMA query_only = ON")
         conn.set_progress_handler(lambda: 1 if time.monotonic() >= deadline else 0, 100)
+        outcome_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(outcomes)").fetchall()
+        }
+        has_warning_kind = "warning_kind" in outcome_columns
         sample_count = conn.execute(
             f"""
             SELECT COUNT(*) FROM (
@@ -419,6 +476,41 @@ def read_memory_advisory(
             """,
             (target,),
         ).fetchone()
+        action_counts = conn.execute(
+            f"""
+            SELECT COALESCE(a.act, 'unknown'), COUNT(*)
+            FROM (
+                SELECT o.action_id
+                FROM outcomes AS o
+                JOIN actions AS a USING (action_id)
+                WHERE {effective_target} = ?
+                ORDER BY o.timestamp_ms DESC
+                LIMIT ?
+            ) AS recent
+            JOIN actions AS a USING (action_id)
+            GROUP BY a.act
+            ORDER BY COUNT(*) DESC, a.act
+            """,
+            (target, sample_limit),
+        ).fetchall()
+        warnings = []
+        if has_warning_kind:
+            warnings = conn.execute(
+                f"""
+                SELECT COALESCE(warning_kind, 'Unknown'), COUNT(*)
+                FROM (
+                    SELECT o.warning_kind
+                    FROM outcomes AS o
+                    JOIN actions AS a USING (action_id)
+                    WHERE {effective_target} = ? AND o.warning_kind IS NOT NULL
+                    ORDER BY o.timestamp_ms DESC
+                    LIMIT ?
+                )
+                GROUP BY warning_kind
+                ORDER BY COUNT(*) DESC, warning_kind
+                """,
+                (target, sample_limit),
+            ).fetchall()
     except (sqlite3.Error, OSError):
         return None, None
     finally:
@@ -432,6 +524,20 @@ def read_memory_advisory(
             kind = "Other"
         failure_counts[kind] = failure_counts.get(kind, 0) + int(count)
 
+    warning_counts: dict[str, int] = {}
+    for raw_kind, count in warnings:
+        kind = str(raw_kind)
+        if kind not in ALLOWED_ADVISORY_WARNING_KINDS:
+            kind = "Other"
+        warning_counts[kind] = warning_counts.get(kind, 0) + int(count)
+
+    recent_actions: dict[str, int] = {}
+    for raw_act, count in action_counts:
+        act = str(raw_act)
+        if act not in ALLOWED_ACTS:
+            act = "unknown"
+        recent_actions[act] = recent_actions.get(act, 0) + int(count)
+
     last_verified_action = None
     if last_verified and last_verified[0] in ALLOWED_ACTS:
         last_verified_action = last_verified[0]
@@ -441,6 +547,8 @@ def read_memory_advisory(
         "target_selector": target,
         "sample_count": int(sample_count),
         "recent_failures": failure_counts,
+        "recent_warnings": warning_counts,
+        "recent_actions": recent_actions,
         "last_verified_action": last_verified_action,
     }
     canonical = json.dumps(advisory, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -997,6 +1105,77 @@ def safe_float(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
+def extract_prompt_json(prompt: str, marker: str) -> dict[str, Any]:
+    start = prompt.find(marker)
+    if start < 0:
+        return {}
+    start += len(marker)
+    extracted = extract_first_json_object(prompt[start:])
+    if extracted is None:
+        return {}
+    try:
+        value = json.loads(extracted)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def dynamic_advisory_is_hot(advisory: dict[str, Any]) -> bool:
+    failures = advisory.get("recent_failures") if isinstance(advisory, dict) else {}
+    warnings = advisory.get("recent_warnings") if isinstance(advisory, dict) else {}
+    if not isinstance(failures, dict):
+        failures = {}
+    if not isinstance(warnings, dict):
+        warnings = {}
+    return (
+        safe_int(failures.get("TargetDrift"), 0)
+        + safe_int(failures.get("StaleFrame"), 0)
+        + safe_int(warnings.get("StaleButHit"), 0)
+        >= 3
+    )
+
+
+def dynamic_control_click_point(state: dict[str, Any], target_id: str) -> dict[str, Any]:
+    dynamic_state = state.get("dynamic_state")
+    if not isinstance(dynamic_state, dict):
+        return {
+            "tick": safe_int(state.get("tick_id"), 1),
+            "act": "noop",
+            "reason": "dynamic state missing",
+        }
+    targets = dynamic_state.get("targets")
+    target = None
+    if isinstance(targets, list):
+        target = next(
+            (
+                item
+                for item in targets
+                if isinstance(item, dict)
+                and item.get("id") == target_id
+                and isinstance(item.get("x"), (int, float))
+                and isinstance(item.get("y"), (int, float))
+                and isinstance(item.get("w"), (int, float))
+                and isinstance(item.get("h"), (int, float))
+            ),
+            None,
+        )
+    if target is None:
+        return {
+            "tick": safe_int(state.get("tick_id"), 1),
+            "act": "noop",
+            "reason": f"dynamic target missing: {target_id}",
+        }
+    return {
+        "tick": safe_int(state.get("tick_id"), 1),
+        "act": "click_point",
+        "target_id": target_id,
+        "x": float(target["x"]) + float(target["w"]) + 20.0,
+        "y": float(target["y"]) + float(target["h"]) / 2.0,
+        "frame_id": max(safe_int(dynamic_state.get("frame_id"), 0), 0),
+        "reason": "validation model attempts risky dynamic click without advisory",
+    }
+
+
 def first_dynamic_target_id(dynamic_state: dict[str, Any]) -> str | None:
     targets = dynamic_state.get("targets")
     if not isinstance(targets, list):
@@ -1248,11 +1427,64 @@ def run_selftest() -> None:
         assert advisory is not None
         assert advisory["sample_count"] == 3
         assert advisory["recent_failures"] == {"Other": 1, "WaitConditionNotMet": 1}
+        assert advisory["recent_warnings"] == {}
+        assert advisory["recent_actions"] == {"click": 2, "wait": 1}
         assert advisory["last_verified_action"] == "click"
         assert meta is not None and meta["scope"] == "active_step_target"
         packet = attach_advisory_meta(active_action, meta)
         assert packet["action"]["act"] == "click"
         assert packet["advisory_meta"]["hash"] == meta["hash"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "dynamic-advisory.sqlite"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE actions (action_id TEXT PRIMARY KEY, act TEXT, target TEXT, action_json TEXT);
+            CREATE TABLE outcomes (action_id TEXT PRIMARY KEY, timestamp_ms INTEGER, status TEXT, failure_kind TEXT, warning_kind TEXT);
+            INSERT INTO actions VALUES
+                ('d1', 'click_point', 'heal', '{}'),
+                ('d2', 'click_point', 'heal', '{}'),
+                ('d3', 'click_point', 'heal', '{}'),
+                ('d4', 'click_point', 'heal', '{}');
+            INSERT INTO outcomes VALUES
+                ('d1', 1, 'Failed', 'TargetDrift', NULL),
+                ('d2', 2, 'Failed', 'StaleFrame', NULL),
+                ('d3', 3, 'Verified', NULL, 'StaleButHit'),
+                ('d4', 4, 'Verified', NULL, NULL);
+            """
+        )
+        conn.commit()
+        conn.close()
+        dynamic_payload = {
+            "tick_id": 7,
+            "active_step": {
+                "step_index": 0,
+                "intent": "compile dynamic point",
+                "target_selector": "heal",
+            },
+            "dynamic_state": {
+                "frame_id": 42,
+                "targets": [{"id": "heal", "x": 10, "y": 20, "w": 30, "h": 10}],
+            },
+        }
+        old_db = os.environ.get("GENESIS_ADVISORY_DB")
+        had_heal_target = "heal" in ALLOWED_CLICK_TARGETS
+        os.environ["GENESIS_ADVISORY_DB"] = str(db_path)
+        ALLOWED_CLICK_TARGETS.add("heal")
+        try:
+            advisory, _ = read_memory_advisory(dynamic_payload)
+        finally:
+            if old_db is None:
+                os.environ.pop("GENESIS_ADVISORY_DB", None)
+            else:
+                os.environ["GENESIS_ADVISORY_DB"] = old_db
+            if not had_heal_target:
+                ALLOWED_CLICK_TARGETS.discard("heal")
+        assert advisory is not None
+        assert advisory["recent_failures"] == {"StaleFrame": 1, "TargetDrift": 1}
+        assert advisory["recent_warnings"] == {"StaleButHit": 1}
+        assert advisory["recent_actions"] == {"click_point": 4}
 
     validation_model = MemoryGuidedValidationModel()
     without_history = infer_action(validation_model, request, active_payload)
