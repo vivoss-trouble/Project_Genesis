@@ -153,17 +153,23 @@ class DynamicArenaEngine:
                 return
             self.last_action = action
             self.last_verdict = self._judge_action(action)
+            self.last_action_id = self.last_verdict.get("action_id")
             self.last_error_kind = self.last_verdict.get("failure_kind")
             self.last_error = self.last_verdict.get("reason")
             self._log(
-                f"{action.get('act')} target={action.get('target_id')} "
+                f"{action.get('act')} id={action.get('action_id')} target={action.get('target_id')} "
                 f"verdict={self.last_verdict.get('status')} "
                 f"failure={self.last_error_kind} warning={self.last_verdict.get('warning_kind')}"
             )
 
     def _judge_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        action_id = str(action.get("action_id") or "")
         if action.get("act") != "click_point":
-            return self._failed("UnsupportedAction", "dynamic arena accepts click_point only")
+            return self._failed(
+                "UnsupportedAction",
+                "dynamic arena accepts click_point only",
+                action_id=action_id,
+            )
 
         target_id = str(action.get("target_id") or "")
         action_frame = int(action.get("frame_id") or -1)
@@ -173,21 +179,46 @@ class DynamicArenaEngine:
         target = self.target if target_id == self.target.id else None
 
         if not self.focused:
-            return self._failed("FocusLost", "arena focus is false", frame_delta=frame_delta)
+            return self._failed(
+                "FocusLost", "arena focus is false", frame_delta=frame_delta, action_id=action_id
+            )
         if target is None:
-            return self._failed("TargetMissing", f"target_id not found: {target_id}", frame_delta)
+            return self._failed(
+                "TargetMissing", f"target_id not found: {target_id}", frame_delta, action_id=action_id
+            )
         if target.hidden or not target.visible:
-            return self._failed("TargetHidden", f"target hidden: {target_id}", frame_delta)
+            return self._failed(
+                "TargetHidden", f"target hidden: {target_id}", frame_delta, action_id=action_id
+            )
         if target.occluded:
-            return self._failed("TargetOccluded", f"target occluded: {target_id}", frame_delta)
+            return self._failed(
+                "TargetOccluded", f"target occluded: {target_id}", frame_delta, action_id=action_id
+            )
         is_hit = target.contains(x, y)
         drift = self._drift_px(x, y, target)
         if frame_delta > FRESH_FRAME_TOLERANCE and not is_hit:
-            return self._failed("StaleFrame", "frame stale and point missed target", frame_delta, drift)
+            return self._failed(
+                "StaleFrame",
+                "frame stale and point missed target",
+                frame_delta,
+                drift,
+                action_id=action_id,
+            )
         if x < 0 or y < 0 or x > WIDTH or y > HEIGHT:
-            return self._failed("CoordinateOutOfBounds", "click point outside arena", frame_delta)
+            return self._failed(
+                "CoordinateOutOfBounds",
+                "click point outside arena",
+                frame_delta,
+                action_id=action_id,
+            )
         if frame_delta <= FRESH_FRAME_TOLERANCE and not is_hit:
-            return self._failed("TargetDrift", "fresh frame but target moved away", frame_delta, drift)
+            return self._failed(
+                "TargetDrift",
+                "fresh frame but target moved away",
+                frame_delta,
+                drift,
+                action_id=action_id,
+            )
 
         warning = None
         policy = "within_tolerance"
@@ -198,6 +229,7 @@ class DynamicArenaEngine:
             warning = "HighSpatialDrift"
 
         return {
+            "action_id": action_id,
             "status": "Verified",
             "failure_kind": None,
             "warning_kind": warning,
@@ -216,8 +248,10 @@ class DynamicArenaEngine:
         reason: str,
         frame_delta: int | None = None,
         drift: float | None = None,
+        action_id: str = "",
     ) -> dict[str, Any]:
         return {
+            "action_id": action_id,
             "status": "Failed",
             "failure_kind": kind,
             "warning_kind": None,
@@ -249,6 +283,7 @@ class DynamicArenaEngine:
             "max_spatial_drift_px": MAX_SPATIAL_DRIFT_PX,
             "targets": [self.target.snapshot()],
             "last_action": self.last_action,
+            "last_action_id": self.last_verdict.get("action_id") if self.last_verdict else None,
             "last_error_kind": self.last_error_kind,
             "last_error": self.last_error,
             "last_verdict": self.last_verdict,

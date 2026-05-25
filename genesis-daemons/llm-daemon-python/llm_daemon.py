@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import socket
 import sqlite3
@@ -41,7 +42,15 @@ ALLOWED_WAIT_SELECTORS = set(
     ).split(",")
     if item.strip()
 )
-ALLOWED_ACTS = {"noop", "click", "type", "key", "wait", "assert_ui_state"}
+ALLOWED_ACTS = {
+    "noop",
+    "click",
+    "type",
+    "key",
+    "wait",
+    "click_point",
+    "assert_ui_state",
+}
 ALLOWED_ADVISORY_FAILURE_KINDS = {
     "ActionQueueFull",
     "AssertionError",
@@ -51,6 +60,16 @@ ALLOWED_ADVISORY_FAILURE_KINDS = {
     "SelectorNotAllowed",
     "TimeoutError",
     "WaitConditionNotMet",
+    "CoordinateOutOfBounds",
+    "DynamicVerdictMissing",
+    "FocusLost",
+    "HitboxMismatch",
+    "StaleFrame",
+    "TargetDrift",
+    "TargetHidden",
+    "TargetMissing",
+    "TargetOccluded",
+    "UnsupportedAction",
     "Unknown",
 }
 MAX_REASON_LEN = 240
@@ -61,6 +80,8 @@ MAX_PLAN_INTENT_LEN = 240
 MAX_PLAN_STEPS = 8
 MAX_ADVISORY_SAMPLES = 100
 MAX_ADVISORY_QUERY_MS = 50
+COORDINATE_ABS_LIMIT = 1_000_000
+TARGET_ID_MAX_LEN = 64
 
 def main() -> None:
     if os.environ.get("GENESIS_DAEMON_SELFTEST") == "1":
@@ -299,6 +320,9 @@ def system_prompt() -> str:
         'or {"tick":1,"act":"noop","reason":"state stable"} '
         'or {"tick":1,"act":"wait","ms":1000,"expected_state":'
         '{"type":"element_visible","selector":"#selector"},"reason":"wait for element"}. '
+        'For dynamic_state active steps, you may return {"tick":1,"act":"click_point",'
+        '"target_id":"heal","x":312.0,"y":188.0,"frame_id":1842,'
+        '"reason":"target visible in committed frame"}. '
         "If the state contains macro_goal, return a read-only plan draft instead: "
         '{"tick":1,"plan_id":"plan-1","goal":"goal text","steps":['
         '{"step_index":0,"intent":"observe current state","target_selector":null}]}. '
@@ -530,6 +554,14 @@ def fallback_step_action(
                 return noop_after_failed_repeat(request, failed_last_action(payload))
             return action
 
+    dynamic_state = payload.get("dynamic_state")
+    if isinstance(dynamic_state, dict):
+        dynamic_action = fallback_dynamic_click_point(tick, target, dynamic_state, intent)
+        if dynamic_action is not None:
+            if repeats_failed_action(dynamic_action, failed_last_action(payload)):
+                return noop_after_failed_repeat(request, failed_last_action(payload))
+            return dynamic_action
+
     if isinstance(web_state, dict) and os.environ.get("GENESIS_WEB_FALLBACK_CLICK") == "1":
         allowed = web_state.get("allowed_click_selectors") or []
         if isinstance(allowed, list) and target in allowed:
@@ -570,6 +602,7 @@ def fallback_plan(
 
     fantasy_state = payload.get("fantasy_state")
     web_state = payload.get("web_state")
+    dynamic_state = payload.get("dynamic_state")
     if isinstance(fantasy_state, dict):
         health = safe_int(fantasy_state.get("health"), 100)
         heal_target = "#heal-btn" if "#heal-btn" in ALLOWED_CLICK_TARGETS else None
@@ -602,6 +635,25 @@ def fallback_plan(
                     "target_selector": None,
                 }
             )
+    elif isinstance(dynamic_state, dict):
+        frame_id = safe_int(dynamic_state.get("frame_id"), 0)
+        steps.append(
+            {
+                "step_index": 1,
+                "intent": clamp_text(
+                    f"Compile a click_point only from the latest committed dynamic frame={frame_id}",
+                    MAX_PLAN_INTENT_LEN,
+                ),
+                "target_selector": first_dynamic_target_id(dynamic_state),
+            }
+        )
+        steps.append(
+            {
+                "step_index": len(steps),
+                "intent": "Verify the dynamic arena last_verdict and classify any frame or drift failure",
+                "target_selector": None,
+            }
+        )
     elif isinstance(web_state, dict):
         title = str(web_state.get("title") or "")[:80]
         mode = str(web_state.get("mode") or "unknown")[:40]
@@ -838,6 +890,35 @@ def normalize_action(
             return None, "repeated exact failed action"
         return normalized, None
 
+    if act == "click_point":
+        target_id = action.get("target_id")
+        if not isinstance(target_id, str):
+            return None, "click_point target_id must be string"
+        target_id = target_id.strip()
+        if not target_id or len(target_id) > TARGET_ID_MAX_LEN:
+            return None, f"click_point target_id outside 1..{TARGET_ID_MAX_LEN}"
+        x = safe_float(action.get("x"))
+        y = safe_float(action.get("y"))
+        if x is None or y is None:
+            return None, "click_point coordinates must be finite numbers"
+        if abs(x) > COORDINATE_ABS_LIMIT or abs(y) > COORDINATE_ABS_LIMIT:
+            return None, f"click_point coordinate outside abs limit {COORDINATE_ABS_LIMIT}"
+        frame_id = action.get("frame_id")
+        if isinstance(frame_id, bool) or not isinstance(frame_id, int) or frame_id < 0:
+            return None, "click_point frame_id must be a non-negative integer"
+        normalized = {
+            "tick": tick,
+            "act": "click_point",
+            "target_id": target_id,
+            "x": x,
+            "y": y,
+            "frame_id": frame_id,
+            "reason": reason or "model chose click_point",
+        }
+        if repeats_failed_action(normalized, failed_last_action(payload)):
+            return None, "repeated exact failed action"
+        return normalized, None
+
     if act == "assert_ui_state":
         target = action.get("target")
         expected = action.get("expected")
@@ -877,6 +958,13 @@ def repeats_failed_action(action: dict[str, Any], failed: dict[str, Any] | None)
         return action.get("ms") == failed.get("ms") and action.get(
             "expected_state"
         ) == failed.get("expected_state")
+    if act == "click_point":
+        return (
+            action.get("target_id") == failed.get("target_id")
+            and action.get("x") == failed.get("x")
+            and action.get("y") == failed.get("y")
+            and action.get("frame_id") == failed.get("frame_id")
+        )
     return act == "noop"
 
 
@@ -898,6 +986,77 @@ def safe_int(value: Any, default: int) -> int:
         return int(value)
     except Exception:
         return default
+
+
+def safe_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    return result if math.isfinite(result) else None
+
+
+def first_dynamic_target_id(dynamic_state: dict[str, Any]) -> str | None:
+    targets = dynamic_state.get("targets")
+    if not isinstance(targets, list):
+        return None
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        target_id = target.get("id")
+        if isinstance(target_id, str) and target_id in ALLOWED_CLICK_TARGETS:
+            return target_id
+    return None
+
+
+def fallback_dynamic_click_point(
+    tick: int, target_id: str, dynamic_state: dict[str, Any], intent: str
+) -> dict[str, Any] | None:
+    targets = dynamic_state.get("targets")
+    if not isinstance(targets, list):
+        return None
+    target = next(
+        (
+            item
+            for item in targets
+            if isinstance(item, dict)
+            and item.get("id") == target_id
+            and isinstance(item.get("x"), (int, float))
+            and isinstance(item.get("y"), (int, float))
+            and isinstance(item.get("w"), (int, float))
+            and isinstance(item.get("h"), (int, float))
+        ),
+        None,
+    )
+    if target is None:
+        return None
+
+    frame_id = max(safe_int(dynamic_state.get("frame_id"), 0), 0)
+    mode = os.environ.get("GENESIS_DYNAMIC_FALLBACK_MODE", "hit").strip().lower()
+    if mode == "stale":
+        x = -100.0
+        y = -100.0
+        frame_id = max(0, frame_id - 99)
+    elif mode == "oob":
+        x = -100.0
+        y = -100.0
+    elif mode == "drift":
+        x = float(target["x"]) + float(target["w"]) + 20.0
+        y = float(target["y"]) + float(target["h"]) / 2.0
+    else:
+        x = float(target["x"]) + float(target["w"]) / 2.0
+        y = float(target["y"]) + float(target["h"]) / 2.0
+
+    return {
+        "tick": tick,
+        "act": "click_point",
+        "target_id": target_id,
+        "x": x,
+        "y": y,
+        "frame_id": frame_id,
+        "reason": clamp_text(f"dynamic active_step compiled: {intent}", MAX_REASON_LEN),
+    }
 
 
 def clamp_text(text: str, max_len: int) -> str:
@@ -939,6 +1098,9 @@ def run_selftest() -> None:
         ('{"act":"wait","ms":1000,"reason":"missing expectation"}', None),
         ('{"act":"wait","ms":1000,"expected_state":{"type":"element_visible","selector":"#evil"},"reason":"unsafe"}', None),
         ('{"act":"wait","ms":1000,"expected_state":{"type":"element_visible","selector":"#heal-btn"},"reason":"observe"}', "wait"),
+        ('{"act":"click_point","target_id":"heal","x":-20,"y":9999,"frame_id":42,"reason":"arena judges"}', "click_point"),
+        ('{"act":"click_point","target_id":"heal","x":NaN,"y":0,"frame_id":42,"reason":"bad"}', None),
+        ('{"act":"click_point","target_id":"heal","x":1000001,"y":0,"frame_id":42,"reason":"too far"}', None),
     ]
 
     for raw, expected_act in cases:
@@ -1024,6 +1186,7 @@ def run_selftest() -> None:
     active_action = fallback_action(request, active_payload)
     assert active_action["act"] == "click"
     assert active_action["target"] == "#heal-btn"
+
     rejected_plan, error = purify_action(
         json.dumps(
             {

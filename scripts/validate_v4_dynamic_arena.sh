@@ -88,6 +88,7 @@ assert second["frame_id"] > first["frame_id"], (first, second)
 assert second["sense_latency_ms"] >= 0, second
 target = second["targets"][0]
 hit = {
+    "action_id": "validate-hit",
     "act": "click_point",
     "target_id": target["id"],
     "x": target["x"] + target["w"] / 2,
@@ -99,9 +100,11 @@ assert send(hit)["status"] == "queued"
 time.sleep(0.08)
 verified = state()["last_verdict"]
 assert verified["status"] == "Verified", verified
+assert verified["action_id"] == "validate-hit", verified
 assert verified["failure_kind"] is None, verified
 
 miss = {
+    "action_id": "validate-stale",
     "act": "click_point",
     "target_id": target["id"],
     "x": -10,
@@ -113,6 +116,7 @@ assert send(miss)["status"] == "queued"
 time.sleep(0.08)
 failed = state()["last_verdict"]
 assert failed["status"] == "Failed", failed
+assert failed["action_id"] == "validate-stale", failed
 assert failed["failure_kind"] == "StaleFrame", failed
 print("[v4-dynamic-arena] committed-frame OCC validation passed")
 PY

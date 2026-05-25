@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS outcomes (
     status TEXT NOT NULL,
     reason TEXT,
     failure_kind TEXT,
+    warning_kind TEXT,
     policy TEXT,
     target TEXT,
     evidence_json TEXT NOT NULL
@@ -194,6 +195,7 @@ def project(audit_path: Path, db_path: Path) -> int:
 
     conn = sqlite3.connect(db_path)
     conn.executescript(SCHEMA)
+    ensure_schema_compat(conn)
 
     source_path = str(audit_path)
     count = 0
@@ -222,6 +224,14 @@ def project(audit_path: Path, db_path: Path) -> int:
     conn.commit()
     conn.close()
     return count
+
+
+def ensure_schema_compat(conn: sqlite3.Connection) -> None:
+    outcome_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(outcomes)").fetchall()
+    }
+    if "warning_kind" not in outcome_columns:
+        conn.execute("ALTER TABLE outcomes ADD COLUMN warning_kind TEXT")
 
 
 def project_event(
@@ -387,7 +397,7 @@ def project_brain_action(
             timestamp_ms,
             action_json,
             action.get("act"),
-            action.get("target"),
+            action.get("target") or action.get("target_id"),
             action.get("reason"),
         ),
     )
@@ -478,8 +488,8 @@ def project_outcome(
         """
         INSERT OR REPLACE INTO outcomes
             (action_id, tick_id, source_tick_id, dispatched_tick_id, timestamp_ms,
-             status, reason, failure_kind, policy, target, evidence_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             status, reason, failure_kind, warning_kind, policy, target, evidence_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             payload.get("action_id"),
@@ -490,6 +500,7 @@ def project_outcome(
             status,
             reason,
             evidence.get("failure_kind") if isinstance(evidence, dict) else None,
+            evidence.get("warning_kind") if isinstance(evidence, dict) else None,
             evidence.get("policy") if isinstance(evidence, dict) else None,
             evidence.get("target") if isinstance(evidence, dict) else None,
             json.dumps(evidence, ensure_ascii=False, sort_keys=True),

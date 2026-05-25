@@ -3,7 +3,24 @@ use serde_json::{Value, json};
 use crate::act::{GenesisAction, WaitExpectedState};
 use crate::audit::VerificationResult;
 
+#[cfg(test)]
 pub fn verify_action(action: &GenesisAction, sense_payload: &str) -> (VerificationResult, Value) {
+    verify_action_inner(None, action, sense_payload)
+}
+
+pub fn verify_pending_action(
+    action_id: &str,
+    action: &GenesisAction,
+    sense_payload: &str,
+) -> (VerificationResult, Value) {
+    verify_action_inner(Some(action_id), action, sense_payload)
+}
+
+fn verify_action_inner(
+    expected_action_id: Option<&str>,
+    action: &GenesisAction,
+    sense_payload: &str,
+) -> (VerificationResult, Value) {
     let state = serde_json::from_str::<Value>(sense_payload).unwrap_or(Value::Null);
 
     match action {
@@ -30,6 +47,109 @@ pub fn verify_action(action: &GenesisAction, sense_payload: &str) -> (Verificati
         GenesisAction::Wait {
             ms, expected_state, ..
         } => verify_wait_condition(*ms, expected_state, &state),
+        GenesisAction::ClickPoint { target_id, .. } => {
+            verify_dynamic_action(expected_action_id, target_id, &state)
+        }
+    }
+}
+
+fn verify_dynamic_action(
+    expected_action_id: Option<&str>,
+    target_id: &str,
+    state: &Value,
+) -> (VerificationResult, Value) {
+    let dynamic_state = state.get("dynamic_state");
+    let verdict = dynamic_state
+        .and_then(|value| value.get("last_verdict"))
+        .filter(|value| !value.is_null());
+
+    let Some(verdict) = verdict else {
+        let evidence = json!({
+            "policy": "dynamic_last_verdict",
+            "target": target_id,
+            "failure_kind": "DynamicVerdictMissing",
+            "last_verdict": Value::Null,
+        });
+        return (
+            VerificationResult::Failed {
+                reason: "dynamic_verdict_missing".to_string(),
+            },
+            evidence,
+        );
+    };
+
+    let status = verdict.get("status").and_then(Value::as_str);
+    let failure_kind = verdict.get("failure_kind").and_then(Value::as_str);
+    let warning_kind = verdict.get("warning_kind").and_then(Value::as_str);
+    let reason = verdict.get("reason").and_then(Value::as_str);
+    let verdict_target = verdict.get("target_id").and_then(Value::as_str);
+    let verdict_action_id = verdict.get("action_id").and_then(Value::as_str);
+
+    let evidence = json!({
+        "policy": "dynamic_last_verdict",
+        "target": target_id,
+        "expected_action_id": expected_action_id,
+        "verdict_action_id": verdict_action_id,
+        "verdict_target_id": verdict_target,
+        "failure_kind": failure_kind,
+        "warning_kind": warning_kind,
+        "frame_delta": verdict.get("frame_delta").cloned().unwrap_or(Value::Null),
+        "spatial_drift_px": verdict.get("spatial_drift_px").cloned().unwrap_or(Value::Null),
+        "staleness_policy": verdict.get("staleness_policy").cloned().unwrap_or(Value::Null),
+        "observed_frame_id": verdict.get("observed_frame_id").cloned().unwrap_or(Value::Null),
+        "last_verdict": verdict,
+    });
+
+    if let Some(expected) = expected_action_id {
+        if verdict_action_id != Some(expected) {
+            return (
+                VerificationResult::Failed {
+                    reason: format!(
+                        "dynamic_verdict_action_mismatch:expected={expected}:actual={}",
+                        verdict_action_id.unwrap_or("<missing>")
+                    ),
+                },
+                json!({
+                    "policy": "dynamic_last_verdict",
+                    "target": target_id,
+                    "expected_action_id": expected,
+                    "verdict_action_id": verdict_action_id,
+                    "verdict_target_id": verdict_target,
+                    "failure_kind": "DynamicVerdictActionMismatch",
+                    "warning_kind": Value::Null,
+                    "last_verdict": verdict,
+                }),
+            );
+        }
+    }
+
+    match status {
+        Some("Verified") if verdict_target == Some(target_id) => {
+            (VerificationResult::Verified, evidence)
+        }
+        Some("Verified") => (
+            VerificationResult::Failed {
+                reason: "dynamic_verdict_target_mismatch".to_string(),
+            },
+            evidence,
+        ),
+        Some("Failed") => (
+            VerificationResult::Failed {
+                reason: match (failure_kind, reason) {
+                    (Some(kind), Some(message)) => format!("dynamic_failure:{kind}:{message}"),
+                    (Some(kind), None) => format!("dynamic_failure:{kind}"),
+                    (None, Some(message)) => format!("dynamic_failure:{message}"),
+                    (None, None) => "dynamic_failure:unknown".to_string(),
+                },
+            },
+            evidence,
+        ),
+        _ => (
+            VerificationResult::Failed {
+                reason: "dynamic_verdict_invalid".to_string(),
+            },
+            evidence,
+        ),
     }
 }
 
@@ -197,5 +317,51 @@ mod tests {
         let (result, evidence) = verify_action(&wait_for("button"), payload);
         assert!(matches!(result, VerificationResult::Failed { .. }));
         assert_eq!(evidence["failure_kind"], "WaitConditionNotMet");
+    }
+
+    #[test]
+    fn click_point_uses_dynamic_arena_verdict() {
+        let action = GenesisAction::ClickPoint {
+            target_id: "heal".to_string(),
+            x: 10.0,
+            y: 10.0,
+            frame_id: 5,
+            reason: "test".to_string(),
+        };
+        let payload = r#"{"dynamic_state":{"last_verdict":{"action_id":"act-9-1","status":"Verified","failure_kind":null,"warning_kind":"StaleButHit","target_id":"heal","frame_delta":4,"spatial_drift_px":3.0,"staleness_policy":"stale_but_hit","observed_frame_id":9}}}"#;
+        let (result, evidence) = verify_pending_action("act-9-1", &action, payload);
+        assert!(matches!(result, VerificationResult::Verified));
+        assert_eq!(evidence["warning_kind"], "StaleButHit");
+        assert_eq!(evidence["frame_delta"], 4);
+    }
+
+    #[test]
+    fn click_point_fails_with_dynamic_failure_kind() {
+        let action = GenesisAction::ClickPoint {
+            target_id: "heal".to_string(),
+            x: -100.0,
+            y: -100.0,
+            frame_id: 1,
+            reason: "test".to_string(),
+        };
+        let payload = r#"{"dynamic_state":{"last_verdict":{"action_id":"act-3-1","status":"Failed","failure_kind":"StaleFrame","reason":"frame stale and point missed target","target_id":"heal","frame_delta":99}}}"#;
+        let (result, evidence) = verify_pending_action("act-3-1", &action, payload);
+        assert!(matches!(result, VerificationResult::Failed { .. }));
+        assert_eq!(evidence["failure_kind"], "StaleFrame");
+    }
+
+    #[test]
+    fn click_point_rejects_ghost_verdict_action_id() {
+        let action = GenesisAction::ClickPoint {
+            target_id: "heal".to_string(),
+            x: 10.0,
+            y: 10.0,
+            frame_id: 5,
+            reason: "test".to_string(),
+        };
+        let payload = r#"{"dynamic_state":{"last_verdict":{"action_id":"act-old","status":"Verified","failure_kind":null,"target_id":"heal","frame_delta":0}}}"#;
+        let (result, evidence) = verify_pending_action("act-new", &action, payload);
+        assert!(matches!(result, VerificationResult::Failed { .. }));
+        assert_eq!(evidence["failure_kind"], "DynamicVerdictActionMismatch");
     }
 }

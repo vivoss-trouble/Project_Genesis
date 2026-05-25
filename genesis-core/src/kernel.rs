@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::act::{ActDispatcher, BrainActionEnvelope};
 use crate::audit::{AuditEvent, AuditLogger, PlanStep, VerificationResult};
-use crate::verify::verify_action;
+use crate::verify::verify_pending_action;
 use crate::watchdog::PluginWorker;
 
 const PLUGIN_CALL_TIMEOUT: Duration = Duration::from_millis(15);
@@ -146,7 +146,8 @@ impl GenesisKernel {
     ) -> Option<serde_json::Value> {
         let mut latest_failure = None;
         for pending in self.act_dispatcher.take_pending_for_verification(tick_id) {
-            let (result, evidence) = verify_action(&pending.action, payload);
+            let (result, evidence) =
+                verify_pending_action(&pending.action_id, &pending.action, payload);
             println!(
                 "[Verifier] 🔎 action={} dispatched_tick={} result={:?}",
                 pending.action_id, pending.dispatched_tick_id, result

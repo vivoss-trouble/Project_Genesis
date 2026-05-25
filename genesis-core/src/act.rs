@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::VecDeque;
 use std::io::Write;
 use std::os::unix::net::UnixStream;
@@ -11,7 +12,10 @@ use std::thread;
 use crate::audit::{AuditEvent, AuditLogger};
 
 const ACTUATOR_SOCKET_PATH: &str = "/tmp/genesis_act.sock";
+const DEFAULT_DYNAMIC_ACTUATOR_SOCKET_PATH: &str = "/tmp/genesis_dynamic_act.sock";
 pub const MAX_VERIFIABLE_WAIT_MS: u64 = 2_000;
+pub const COORDINATE_ABS_LIMIT: f64 = 1_000_000.0;
+pub const TARGET_ID_MAX_LEN: usize = 64;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
@@ -46,6 +50,15 @@ pub enum GenesisAction {
         reason: String,
     },
 
+    #[serde(rename = "click_point")]
+    ClickPoint {
+        target_id: String,
+        x: f64,
+        y: f64,
+        frame_id: u64,
+        reason: String,
+    },
+
     #[serde(rename = "assert_ui_state")]
     AssertUiState {
         target: String,
@@ -56,20 +69,37 @@ pub enum GenesisAction {
 
 impl GenesisAction {
     pub fn validate_for_dispatch(&self) -> Result<(), String> {
-        if let GenesisAction::Wait {
-            ms,
-            expected_state: WaitExpectedState::ElementVisible { selector },
-            ..
-        } = self
-        {
-            if *ms > MAX_VERIFIABLE_WAIT_MS {
-                return Err(format!(
-                    "wait ms outside next-tick verification budget: {ms} > {MAX_VERIFIABLE_WAIT_MS}"
-                ));
+        match self {
+            GenesisAction::Wait {
+                ms,
+                expected_state: WaitExpectedState::ElementVisible { selector },
+                ..
+            } => {
+                if *ms > MAX_VERIFIABLE_WAIT_MS {
+                    return Err(format!(
+                        "wait ms outside next-tick verification budget: {ms} > {MAX_VERIFIABLE_WAIT_MS}"
+                    ));
+                }
+                if selector.trim().is_empty() {
+                    return Err("wait expected selector must not be empty".to_string());
+                }
             }
-            if selector.trim().is_empty() {
-                return Err("wait expected selector must not be empty".to_string());
+            GenesisAction::ClickPoint {
+                target_id, x, y, ..
+            } => {
+                if target_id.trim().is_empty() || target_id.len() > TARGET_ID_MAX_LEN {
+                    return Err("click_point target_id outside length bounds".to_string());
+                }
+                if !x.is_finite() || !y.is_finite() {
+                    return Err("click_point coordinates must be finite".to_string());
+                }
+                if x.abs() > COORDINATE_ABS_LIMIT || y.abs() > COORDINATE_ABS_LIMIT {
+                    return Err(format!(
+                        "click_point coordinates outside abs limit: {COORDINATE_ABS_LIMIT}"
+                    ));
+                }
             }
+            _ => {}
         }
 
         Ok(())
@@ -212,7 +242,7 @@ impl ActDispatcher {
 }
 
 fn execute_action(command: ActionCommand, auditor: &AuditLogger) {
-    if let Err(err) = send_to_external_actuator(&command.action) {
+    if let Err(err) = send_to_external_actuator(&command.action_id, &command.action) {
         println!("[Actuator] local actuator unavailable: {}", err);
         auditor.log(AuditEvent::FailureObserved {
             tick_id: command.tick_id,
@@ -262,6 +292,18 @@ fn execute_action(command: ActionCommand, auditor: &AuditLogger) {
                 command.action_id, command.source_tick_id, ms, expected_state, reason
             );
         }
+        GenesisAction::ClickPoint {
+            target_id,
+            x,
+            y,
+            frame_id,
+            reason,
+        } => {
+            println!(
+                "[Actuator] click_point id={} source_tick={} target_id={} x={} y={} frame_id={} reason={}",
+                command.action_id, command.source_tick_id, target_id, x, y, frame_id, reason
+            );
+        }
         GenesisAction::AssertUiState {
             target,
             expected,
@@ -275,9 +317,26 @@ fn execute_action(command: ActionCommand, auditor: &AuditLogger) {
     }
 }
 
-fn send_to_external_actuator(action: &GenesisAction) -> Result<(), String> {
-    let mut stream = UnixStream::connect(ACTUATOR_SOCKET_PATH).map_err(|err| err.to_string())?;
-    let mut frame = serde_json::to_vec(action).map_err(|err| err.to_string())?;
+fn send_to_external_actuator(action_id: &str, action: &GenesisAction) -> Result<(), String> {
+    let socket_path = match action {
+        GenesisAction::ClickPoint { .. } => std::env::var("GENESIS_DYNAMIC_ACT_SOCKET")
+            .unwrap_or_else(|_| DEFAULT_DYNAMIC_ACTUATOR_SOCKET_PATH.to_string()),
+        _ => ACTUATOR_SOCKET_PATH.to_string(),
+    };
+    let mut stream = UnixStream::connect(&socket_path).map_err(|err| err.to_string())?;
+    let mut frame = if matches!(action, GenesisAction::ClickPoint { .. }) {
+        let mut value = serde_json::to_value(action).map_err(|err| err.to_string())?;
+        let Some(object) = value.as_object_mut() else {
+            return Err("click_point action did not serialize as object".to_string());
+        };
+        object.insert(
+            "action_id".to_string(),
+            Value::String(action_id.to_string()),
+        );
+        serde_json::to_vec(&value).map_err(|err| err.to_string())?
+    } else {
+        serde_json::to_vec(action).map_err(|err| err.to_string())?
+    };
     frame.push(b'\n');
     stream.write_all(&frame).map_err(|err| err.to_string())
 }
@@ -306,6 +365,30 @@ mod tests {
                 selector: "a".to_string(),
             },
             reason: "too late".to_string(),
+        };
+        assert!(action.validate_for_dispatch().is_err());
+    }
+
+    #[test]
+    fn click_point_accepts_finite_protocol_coordinates() {
+        let action = GenesisAction::ClickPoint {
+            target_id: "heal".to_string(),
+            x: -20.0,
+            y: 9999.0,
+            frame_id: 42,
+            reason: "let arena judge world facts".to_string(),
+        };
+        assert!(action.validate_for_dispatch().is_ok());
+    }
+
+    #[test]
+    fn click_point_rejects_nonphysical_protocol_values() {
+        let action = GenesisAction::ClickPoint {
+            target_id: "heal".to_string(),
+            x: f64::INFINITY,
+            y: 0.0,
+            frame_id: 42,
+            reason: "bad".to_string(),
         };
         assert!(action.validate_for_dispatch().is_err());
     }

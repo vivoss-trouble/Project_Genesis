@@ -28,8 +28,7 @@ def run_selftest() -> None:
     engine = DynamicArenaEngine()
     engine.start()
     try:
-        time.sleep(0.08)
-        first = engine.read_snapshot()
+        first = wait_ready_snapshot(engine)
         time.sleep(0.08)
         second = engine.read_snapshot()
         assert second["frame_id"] > first["frame_id"], (first, second)
@@ -38,6 +37,7 @@ def run_selftest() -> None:
         y = target["y"] + target["h"] / 2
         assert engine.enqueue_action(
             {
+                "action_id": "selftest-hit",
                 "act": "click_point",
                 "target_id": target["id"],
                 "x": x,
@@ -49,9 +49,11 @@ def run_selftest() -> None:
         time.sleep(0.08)
         verdict = engine.read_snapshot()["last_verdict"]
         assert verdict and verdict["status"] == "Verified", verdict
+        assert verdict["action_id"] == "selftest-hit", verdict
         stale_frame = max(0, engine.frame_id - 99)
         assert engine.enqueue_action(
             {
+                "action_id": "selftest-stale",
                 "act": "click_point",
                 "target_id": target["id"],
                 "x": -20,
@@ -63,10 +65,27 @@ def run_selftest() -> None:
         time.sleep(0.08)
         verdict = engine.read_snapshot()["last_verdict"]
         assert verdict and verdict["failure_kind"] == "StaleFrame", verdict
+        assert verdict["action_id"] == "selftest-stale", verdict
     finally:
         engine.stop()
 
     print("[dynamic-arena] selftest passed")
+
+
+def wait_ready_snapshot(engine: DynamicArenaEngine) -> dict:
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        snapshot = engine.read_snapshot()
+        target = snapshot["targets"][0]
+        if (
+            snapshot["focused"]
+            and target["visible"]
+            and not target["hidden"]
+            and not target["occluded"]
+        ):
+            return snapshot
+        time.sleep(0.02)
+    raise AssertionError(f"arena did not reach a ready selftest frame: {snapshot}")
 
 
 def smoke_server() -> None:
@@ -74,6 +93,7 @@ def smoke_server() -> None:
         state = json.loads(response.read())
     target = state["targets"][0]
     payload = {
+        "action_id": "manual-smoke",
         "act": "click_point",
         "target_id": target["id"],
         "x": target["x"] + target["w"] / 2,
