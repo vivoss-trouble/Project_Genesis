@@ -88,3 +88,10 @@ clean physical decision ledger, not a copy of memory context.
 The suite seeds a deterministic historical projection, runs a JIT wait against
 a local DOM fixture, and asserts that a `MemoryAdvisoryAttached` stamp is
 projected while the decoded action remains free of advisory metadata.
+
+For the separate A/B causal experiment demonstrating a tactical output change
+under an attached advisory, see `docs/v3-memory-guided-live-fire.md` and run:
+
+```bash
+./scripts/validate_v34_memory_live_fire.sh
+```

@@ -83,7 +83,57 @@ def main() -> None:
         threading.Thread(target=handle_client, args=(conn, model), daemon=True).start()
 
 
+class MemoryGuidedValidationModel:
+    """Validation-only model stub for deterministic advisory A/B live fire."""
+
+    def __call__(
+        self,
+        prompt: str,
+        max_tokens: int = 96,
+        temperature: float = 0.0,
+        stop: list[str] | None = None,
+    ) -> dict[str, Any]:
+        del max_tokens, temperature, stop
+        target = sorted(ALLOWED_CLICK_TARGETS)[0] if ALLOWED_CLICK_TARGETS else "#heal-btn"
+        if '"active_step"' not in prompt:
+            result = {
+                "tick": 1,
+                "plan_id": "plan-memory-guided-validation",
+                "goal": "test whether bounded history changes a tactical choice",
+                "steps": [
+                    {
+                        "step_index": 0,
+                        "intent": "choose a safe tactical interaction for the allowlisted target",
+                        "target_selector": target,
+                    }
+                ],
+            }
+        elif "Historical Advisory JSON:" in prompt and '"ReadOnlyMode"' in prompt:
+            result = {
+                "tick": 1,
+                "act": "wait",
+                "ms": 1000,
+                "expected_state": {
+                    "type": "element_visible",
+                    "selector": target,
+                },
+                "reason": "historical click rejection observed; verify visibility without click",
+            }
+        else:
+            result = {
+                "tick": 1,
+                "act": "click",
+                "target": target,
+                "reason": "no historical rejection advisory; attempt allowlisted interaction",
+            }
+        return {"choices": [{"text": json.dumps(result)}]}
+
+
 def load_model() -> Any | None:
+    if os.environ.get("GENESIS_TEST_MEMORY_GUIDED_MODEL") == "1":
+        print("[llm-daemon] using validation-only memory-guided model")
+        return MemoryGuidedValidationModel()
+
     model_path = os.environ.get("GENESIS_MODEL_PATH")
     if not model_path:
         print("[llm-daemon] GENESIS_MODEL_PATH not set; using deterministic fallback")
@@ -1040,6 +1090,17 @@ def run_selftest() -> None:
         packet = attach_advisory_meta(active_action, meta)
         assert packet["action"]["act"] == "click"
         assert packet["advisory_meta"]["hash"] == meta["hash"]
+
+    validation_model = MemoryGuidedValidationModel()
+    without_history = infer_action(validation_model, request, active_payload)
+    with_history = infer_action(
+        validation_model,
+        request,
+        active_payload,
+        {"recent_failures": {"ReadOnlyMode": 3}},
+    )
+    assert without_history["act"] == "click"
+    assert with_history["act"] == "wait"
     print("[llm-daemon] purifier selftest passed")
 
 
