@@ -449,6 +449,14 @@ fn dispatch_brain_action(
                 });
                 return BrainDispatch::None;
             }
+            if let Err(error) = decision.action.validate_for_dispatch() {
+                auditor.log(AuditEvent::FailureObserved {
+                    tick_id,
+                    component: "BrainActionDecoder".to_string(),
+                    error: format!("unsafe action rejected: {error}"),
+                });
+                return BrainDispatch::None;
+            }
             let action_id = act_dispatcher.next_action_id(tick_id);
             println!(
                 "[Act Dispatcher] 🎯 Tick {} decoded source Tick {} action {}: {:?}",

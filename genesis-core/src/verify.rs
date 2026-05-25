@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::act::GenesisAction;
+use crate::act::{GenesisAction, WaitExpectedState};
 use crate::audit::VerificationResult;
 
 pub fn verify_action(action: &GenesisAction, sense_payload: &str) -> (VerificationResult, Value) {
@@ -27,13 +27,63 @@ pub fn verify_action(action: &GenesisAction, sense_payload: &str) -> (Verificati
                 "code": code,
             }),
         ),
-        GenesisAction::Wait { ms, .. } => (
-            VerificationResult::Verified,
-            json!({
-                "policy": "wait_elapsed_by_next_tick",
+        GenesisAction::Wait {
+            ms, expected_state, ..
+        } => verify_wait_condition(*ms, expected_state, &state),
+    }
+}
+
+fn verify_wait_condition(
+    ms: u64,
+    expected_state: &WaitExpectedState,
+    state: &Value,
+) -> (VerificationResult, Value) {
+    match expected_state {
+        WaitExpectedState::ElementVisible { selector } => {
+            let web_state = state.get("web_state");
+            let mode = web_state
+                .and_then(|value| value.get("mode"))
+                .and_then(Value::as_str);
+            let observed = web_state
+                .and_then(|value| value.get("elements"))
+                .and_then(Value::as_array)
+                .is_some_and(|elements| {
+                    elements.iter().any(|element| {
+                        let selector_matches =
+                            element.get("selector").and_then(Value::as_str) == Some(selector);
+                        let has_no_error = element.get("error").is_none();
+                        let rendered_in_browser = mode != Some("playwright")
+                            || element
+                                .get("box")
+                                .is_some_and(|bounding_box| !bounding_box.is_null());
+                        selector_matches && has_no_error && rendered_in_browser
+                    })
+                });
+            let evidence = json!({
+                "policy": "one_tick_wait_condition",
                 "ms": ms,
-            }),
-        ),
+                "expected": {
+                    "type": "element_visible",
+                    "selector": selector,
+                },
+                "actual": {
+                    "element_status": if observed { "visible" } else { "not_found" },
+                    "web_mode": mode,
+                },
+                "failure_kind": if observed { Value::Null } else { json!("WaitConditionNotMet") },
+            });
+
+            if observed {
+                (VerificationResult::Verified, evidence)
+            } else {
+                (
+                    VerificationResult::Failed {
+                        reason: format!("wait_condition_not_met:element_visible:{selector}"),
+                    },
+                    evidence,
+                )
+            }
+        }
     }
 }
 
@@ -116,5 +166,36 @@ fn verify_web_action(target: &str, state: &Value) -> (VerificationResult, Value)
             },
             evidence,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wait_for(selector: &str) -> GenesisAction {
+        GenesisAction::Wait {
+            ms: 1_500,
+            expected_state: WaitExpectedState::ElementVisible {
+                selector: selector.to_string(),
+            },
+            reason: "observe next frame".to_string(),
+        }
+    }
+
+    #[test]
+    fn wait_verifies_when_expected_element_is_visible() {
+        let payload = r#"{"web_state":{"mode":"http_probe","elements":[{"selector":"a"}]}}"#;
+        let (result, evidence) = verify_action(&wait_for("a"), payload);
+        assert!(matches!(result, VerificationResult::Verified));
+        assert_eq!(evidence["actual"]["element_status"], "visible");
+    }
+
+    #[test]
+    fn wait_fails_when_expected_element_is_absent() {
+        let payload = r#"{"web_state":{"mode":"http_probe","elements":[{"selector":"a"}]}}"#;
+        let (result, evidence) = verify_action(&wait_for("button"), payload);
+        assert!(matches!(result, VerificationResult::Failed { .. }));
+        assert_eq!(evidence["failure_kind"], "WaitConditionNotMet");
     }
 }

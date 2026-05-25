@@ -31,9 +31,18 @@ ALLOWED_CLICK_TARGETS = set(
     for item in os.environ.get("GENESIS_ALLOWED_CLICK_TARGETS", "#heal-btn").split(",")
     if item.strip()
 )
+ALLOWED_WAIT_SELECTORS = set(
+    item.strip()
+    for item in os.environ.get(
+        "GENESIS_ALLOWED_WAIT_SELECTORS",
+        os.environ.get("GENESIS_ALLOWED_CLICK_TARGETS", "#heal-btn"),
+    ).split(",")
+    if item.strip()
+)
 ALLOWED_ACTS = {"noop", "click", "type", "key", "wait", "assert_ui_state"}
 MAX_REASON_LEN = 240
 MAX_TEXT_LEN = 500
+MAX_WAIT_MS = 2_000
 MAX_PLAN_GOAL_LEN = 300
 MAX_PLAN_INTENT_LEN = 240
 MAX_PLAN_STEPS = 8
@@ -204,11 +213,14 @@ def infer_action(model: Any, request: dict[str, Any], payload: dict[str, Any]) -
 
 def system_prompt() -> str:
     allowed_targets = ", ".join(sorted(ALLOWED_CLICK_TARGETS)) or "<none>"
+    wait_selectors = ", ".join(sorted(ALLOWED_WAIT_SELECTORS)) or "<none>"
     return (
         "You are the decision center of a local control system. "
         "Return only valid JSON matching one of these forms: "
         '{"tick":1,"act":"click","target":"#selector","reason":"specific reason"} '
-        'or {"tick":1,"act":"noop","reason":"state stable"}. '
+        'or {"tick":1,"act":"noop","reason":"state stable"} '
+        'or {"tick":1,"act":"wait","ms":1000,"expected_state":'
+        '{"type":"element_visible","selector":"#selector"},"reason":"wait for element"}. '
         "If the state contains macro_goal, return a read-only plan draft instead: "
         '{"tick":1,"plan_id":"plan-1","goal":"goal text","steps":['
         '{"step_index":0,"intent":"observe current state","target_selector":null}]}. '
@@ -219,7 +231,9 @@ def system_prompt() -> str:
         "If the state contains last_outcome with status Failed, the previous action did not "
         "produce the expected physical effect. Use its evidence to re-evaluate the current "
         "state, and do not repeat exactly the same failed act/target. "
-        f"Only allowed click targets: {allowed_targets}."
+        f"Only allowed click targets: {allowed_targets}. "
+        f"Wait is verified on the next tick, must use ms <= {MAX_WAIT_MS}, and may only "
+        f"observe these selectors: {wait_selectors}."
     )
 
 
@@ -293,15 +307,42 @@ def fallback_step_action(
             }
 
     web_state = payload.get("web_state")
+    if isinstance(web_state, dict):
+        wait_selector = os.environ.get("GENESIS_WEB_FALLBACK_WAIT_SELECTOR")
+        if (
+            isinstance(wait_selector, str)
+            and wait_selector == target
+            and target in ALLOWED_WAIT_SELECTORS
+        ):
+            action = {
+                "tick": tick,
+                "act": "wait",
+                "ms": min(
+                    max(safe_int(os.environ.get("GENESIS_WEB_FALLBACK_WAIT_MS"), 1000), 0),
+                    MAX_WAIT_MS,
+                ),
+                "expected_state": {
+                    "type": "element_visible",
+                    "selector": target,
+                },
+                "reason": clamp_text(f"active_step waits for visible selector: {target}", MAX_REASON_LEN),
+            }
+            if repeats_failed_action(action, failed_last_action(payload)):
+                return noop_after_failed_repeat(request, failed_last_action(payload))
+            return action
+
     if isinstance(web_state, dict) and os.environ.get("GENESIS_WEB_FALLBACK_CLICK") == "1":
         allowed = web_state.get("allowed_click_selectors") or []
         if isinstance(allowed, list) and target in allowed:
-            return {
+            action = {
                 "tick": tick,
                 "act": "click",
                 "target": target,
                 "reason": clamp_text(f"active_step compiled: {intent}", MAX_REASON_LEN),
             }
+            if repeats_failed_action(action, failed_last_action(payload)):
+                return noop_after_failed_repeat(request, failed_last_action(payload))
+            return action
 
     return {
         "tick": tick,
@@ -571,12 +612,27 @@ def normalize_action(
 
     if act == "wait":
         ms = safe_int(action.get("ms"), 0)
-        if ms < 0 or ms > 10_000:
-            return None, "wait ms outside 0..10000"
+        if ms < 0 or ms > MAX_WAIT_MS:
+            return None, f"wait ms outside 0..{MAX_WAIT_MS}"
+        expected_state = action.get("expected_state")
+        if not isinstance(expected_state, dict):
+            return None, "wait requires expected_state object"
+        if expected_state.get("type") != "element_visible":
+            return None, "wait expected_state type must be element_visible"
+        selector = expected_state.get("selector")
+        if not isinstance(selector, str) or not selector.strip():
+            return None, "wait expected selector must be string"
+        selector = selector.strip()
+        if selector not in ALLOWED_WAIT_SELECTORS:
+            return None, f"wait selector not allowed: {selector}"
         normalized = {
             "tick": tick,
             "act": "wait",
             "ms": ms,
+            "expected_state": {
+                "type": "element_visible",
+                "selector": selector,
+            },
             "reason": reason or "model chose wait",
         }
         if repeats_failed_action(normalized, failed_last_action(payload)):
@@ -619,7 +675,9 @@ def repeats_failed_action(action: dict[str, Any], failed: dict[str, Any] | None)
     if act == "key":
         return action.get("code") == failed.get("code")
     if act == "wait":
-        return action.get("ms") == failed.get("ms")
+        return action.get("ms") == failed.get("ms") and action.get(
+            "expected_state"
+        ) == failed.get("expected_state")
     return act == "noop"
 
 
@@ -678,7 +736,10 @@ def run_selftest() -> None:
         ('[{"act":"noop","reason":"stable"}]', "noop"),
         ('{"act":"click","target":"#evil","reason":"bad"}', None),
         ("no json here", None),
-        ('{"act":"wait","ms":12000,"reason":"too long"}', None),
+        ('{"act":"wait","ms":3000,"expected_state":{"type":"element_visible","selector":"#heal-btn"},"reason":"too long"}', None),
+        ('{"act":"wait","ms":1000,"reason":"missing expectation"}', None),
+        ('{"act":"wait","ms":1000,"expected_state":{"type":"element_visible","selector":"#evil"},"reason":"unsafe"}', None),
+        ('{"act":"wait","ms":1000,"expected_state":{"type":"element_visible","selector":"#heal-btn"},"reason":"observe"}', "wait"),
     ]
 
     for raw, expected_act in cases:

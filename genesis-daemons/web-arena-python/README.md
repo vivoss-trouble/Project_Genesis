@@ -67,3 +67,22 @@ s.sendall((json.dumps({
 }) + "\n").encode())
 PY
 ```
+
+v3.3 supports a passive, next-tick verifiable wait. It does not block the
+microkernel or sleep inside Web Arena; it declares a condition that must be
+visible in the next Sense snapshot:
+
+```json
+{
+  "act": "wait",
+  "ms": 1000,
+  "expected_state": {
+    "type": "element_visible",
+    "selector": "a"
+  },
+  "reason": "wait for an observed link"
+}
+```
+
+`ms` is bounded to `0..2000`, and the selector must be listed in
+`GENESIS_WEB_OBSERVED_SELECTORS`.

@@ -7,11 +7,18 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::thread;
-use std::time::Duration;
 
 use crate::audit::{AuditEvent, AuditLogger};
 
 const ACTUATOR_SOCKET_PATH: &str = "/tmp/genesis_act.sock";
+pub const MAX_VERIFIABLE_WAIT_MS: u64 = 2_000;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type")]
+pub enum WaitExpectedState {
+    #[serde(rename = "element_visible")]
+    ElementVisible { selector: String },
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "act")]
@@ -33,7 +40,11 @@ pub enum GenesisAction {
     Key { code: String, reason: String },
 
     #[serde(rename = "wait")]
-    Wait { ms: u64, reason: String },
+    Wait {
+        ms: u64,
+        expected_state: WaitExpectedState,
+        reason: String,
+    },
 
     #[serde(rename = "assert_ui_state")]
     AssertUiState {
@@ -41,6 +52,28 @@ pub enum GenesisAction {
         expected: String,
         reason: String,
     },
+}
+
+impl GenesisAction {
+    pub fn validate_for_dispatch(&self) -> Result<(), String> {
+        if let GenesisAction::Wait {
+            ms,
+            expected_state: WaitExpectedState::ElementVisible { selector },
+            ..
+        } = self
+        {
+            if *ms > MAX_VERIFIABLE_WAIT_MS {
+                return Err(format!(
+                    "wait ms outside next-tick verification budget: {ms} > {MAX_VERIFIABLE_WAIT_MS}"
+                ));
+            }
+            if selector.trim().is_empty() {
+                return Err("wait expected selector must not be empty".to_string());
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -219,12 +252,15 @@ fn execute_action(command: ActionCommand, auditor: &AuditLogger) {
                 command.action_id, command.source_tick_id, code, reason
             );
         }
-        GenesisAction::Wait { ms, reason } => {
+        GenesisAction::Wait {
+            ms,
+            expected_state,
+            reason,
+        } => {
             println!(
-                "[Actuator] wait id={} source_tick={} ms={} reason={}",
-                command.action_id, command.source_tick_id, ms, reason
+                "[Actuator] passive wait id={} source_tick={} ms={} expected={:?} reason={}",
+                command.action_id, command.source_tick_id, ms, expected_state, reason
             );
-            thread::sleep(Duration::from_millis(ms));
         }
         GenesisAction::AssertUiState {
             target,
@@ -244,4 +280,33 @@ fn send_to_external_actuator(action: &GenesisAction) -> Result<(), String> {
     let mut frame = serde_json::to_vec(action).map_err(|err| err.to_string())?;
     frame.push(b'\n');
     stream.write_all(&frame).map_err(|err| err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_accepts_next_tick_condition_within_budget() {
+        let action = GenesisAction::Wait {
+            ms: MAX_VERIFIABLE_WAIT_MS,
+            expected_state: WaitExpectedState::ElementVisible {
+                selector: "a".to_string(),
+            },
+            reason: "one tick".to_string(),
+        };
+        assert!(action.validate_for_dispatch().is_ok());
+    }
+
+    #[test]
+    fn wait_rejects_duration_beyond_next_tick_budget() {
+        let action = GenesisAction::Wait {
+            ms: MAX_VERIFIABLE_WAIT_MS + 1,
+            expected_state: WaitExpectedState::ElementVisible {
+                selector: "a".to_string(),
+            },
+            reason: "too late".to_string(),
+        };
+        assert!(action.validate_for_dispatch().is_err());
+    }
 }

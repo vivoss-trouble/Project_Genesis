@@ -162,6 +162,29 @@ Brain daemon 看到 `active_step` 时必须降维为战术编译器，输出标�
 
 核心仍然不做 retry、不解释 DOM、不修复 selector。
 
+## v3 第三刀：可验证的单拍等待
+
+v3.3 将 `wait` 从“已投递即成功”的空动作收敛为带有物理预期的
+`GenesisAction`：
+
+```json
+{
+  "act": "wait",
+  "ms": 1000,
+  "expected_state": {
+    "type": "element_visible",
+    "selector": "a"
+  }
+}
+```
+
+铁律：
+
+- `wait` 最大为 2000ms，与当前下一拍 Verify 的观测窗口对齐。
+- 核心不休眠、不计退避次数、不自动重试，只在下一次 Sense 上裁决条件。
+- 条件兑现则 `Verified -> PlanAdvanced`。
+- 条件未兑现则 `WaitConditionNotMet -> PlanAborted`，由 Brain 决定是否重规划。
+
 ## 终极回路
 
 ```text

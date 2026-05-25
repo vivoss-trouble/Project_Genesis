@@ -55,6 +55,7 @@ HEADLESS = os.environ.get("GENESIS_WEB_HEADLESS", "1") != "0"
 FORCE_READ_ONLY = os.environ.get("GENESIS_WEB_FORCE_READ_ONLY", "0") == "1"
 STATE_TIMEOUT_MS = int(os.environ.get("GENESIS_WEB_STATE_TIMEOUT_MS", "300"))
 ACTION_TIMEOUT_MS = int(os.environ.get("GENESIS_WEB_ACTION_TIMEOUT_MS", "3000"))
+MAX_WAIT_MS = 2_000
 REFRESH_INTERVAL_SEC = float(os.environ.get("GENESIS_WEB_REFRESH_SEC", "1.0"))
 ACTION_QUEUE_SIZE = int(os.environ.get("GENESIS_WEB_ACTION_QUEUE", "32"))
 
@@ -239,10 +240,21 @@ def handle_action(state: ArenaState, conn: socket.socket) -> None:
             return
 
         if act == "wait":
-            try:
-                state.action_queue.put_nowait(action)
-            except queue.Full:
-                reject_action(state, "ActionQueueFull", "rejected wait: action queue full")
+            expected = action.get("expected_state")
+            ms = action.get("ms")
+            selector = expected.get("selector") if isinstance(expected, dict) else None
+            if (
+                not isinstance(ms, int)
+                or ms < 0
+                or ms > MAX_WAIT_MS
+                or not isinstance(expected, dict)
+                or expected.get("type") != "element_visible"
+                or not isinstance(selector, str)
+                or selector not in OBSERVED_SELECTORS
+            ):
+                reject_action(state, "InvalidWaitCondition", "rejected unobservable wait condition")
+                return
+            state.log(f"passive wait accepted ms={ms} expected_visible={selector}")
             return
 
         if act not in {"click", "type", "key", "assert_ui_state"}:
@@ -340,10 +352,6 @@ def execute_playwright_action(state: ArenaState, page: Any, action: dict[str, An
         elif act == "key":
             page.keyboard.press(str(action.get("code") or ""), timeout=ACTION_TIMEOUT_MS)
             state.log(f"key: {action.get('code') or ''}")
-        elif act == "wait":
-            ms = max(0, min(int(action.get("ms") or 0), 10_000))
-            time.sleep(ms / 1000)
-            state.log(f"waited {ms}ms: {action.get('reason') or ''}")
         elif act == "assert_ui_state":
             expected = str(action.get("expected") or "")
             text = page.locator(target).inner_text(timeout=STATE_TIMEOUT_MS)
@@ -421,6 +429,7 @@ def run_selftest() -> None:
     assert "Hello world" in text
     assert links and links[0]["selector"] == "a"
     assert origin_of("https://example.com/path") == "https://example.com"
+    assert MAX_WAIT_MS == 2_000
     print("[web-arena] selftest passed")
 
 
