@@ -34,6 +34,9 @@ ALLOWED_CLICK_TARGETS = set(
 ALLOWED_ACTS = {"noop", "click", "type", "key", "wait", "assert_ui_state"}
 MAX_REASON_LEN = 240
 MAX_TEXT_LEN = 500
+MAX_PLAN_GOAL_LEN = 300
+MAX_PLAN_INTENT_LEN = 240
+MAX_PLAN_STEPS = 8
 
 def main() -> None:
     if os.environ.get("GENESIS_DAEMON_SELFTEST") == "1":
@@ -123,6 +126,10 @@ def read_line(conn: socket.socket) -> str:
 def fallback_action(
     request: dict[str, Any], payload: dict[str, Any], reason: str | None = None
 ) -> dict[str, Any]:
+    macro_goal = payload.get("macro_goal")
+    if isinstance(macro_goal, str) and macro_goal.strip():
+        return fallback_plan(request, payload, macro_goal, reason)
+
     failed = failed_last_action(payload)
     state = payload.get("fantasy_state") or {}
     health = safe_int(state.get("health"), 100)
@@ -198,6 +205,10 @@ def system_prompt() -> str:
         "Return only valid JSON matching one of these forms: "
         '{"tick":1,"act":"click","target":"#selector","reason":"specific reason"} '
         'or {"tick":1,"act":"noop","reason":"state stable"}. '
+        "If the state contains macro_goal, return a read-only plan draft instead: "
+        '{"tick":1,"plan_id":"plan-1","goal":"goal text","steps":['
+        '{"step_index":0,"intent":"observe current state","target_selector":null}]}. '
+        "Plans are for audit only and must not assume execution. "
         "No markdown, no commentary, no extra text. "
         "If the state contains last_outcome with status Failed, the previous action did not "
         "produce the expected physical effect. Use its evidence to re-evaluate the current "
@@ -226,7 +237,178 @@ def purify_action(
     if not isinstance(candidate, dict):
         return None, "action is not a JSON object"
 
+    if contains_macro_goal(payload) or "steps" in candidate or "plan_id" in candidate:
+        return normalize_plan(candidate, request, payload)
+
     return normalize_action(candidate, request, payload)
+
+
+def contains_macro_goal(payload: dict[str, Any]) -> bool:
+    goal = payload.get("macro_goal")
+    return isinstance(goal, str) and bool(goal.strip())
+
+
+def fallback_plan(
+    request: dict[str, Any],
+    payload: dict[str, Any],
+    goal: str,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    tick = safe_int(request.get("tick_id"), 0)
+    goal = clamp_text(goal, MAX_PLAN_GOAL_LEN)
+    steps = [
+        {
+            "step_index": 0,
+            "intent": "Observe the current state and preserve v2 Act/Verify boundaries",
+            "target_selector": None,
+        }
+    ]
+
+    fantasy_state = payload.get("fantasy_state")
+    web_state = payload.get("web_state")
+    if isinstance(fantasy_state, dict):
+        health = safe_int(fantasy_state.get("health"), 100)
+        heal_target = "#heal-btn" if "#heal-btn" in ALLOWED_CLICK_TARGETS else None
+        if health <= 65:
+            steps.append(
+                {
+                    "step_index": 1,
+                    "intent": clamp_text(
+                        f"Candidate future action: health={health} is below threshold; consider heal control through existing Act pipeline",
+                        MAX_PLAN_INTENT_LEN,
+                    ),
+                    "target_selector": heal_target,
+                }
+            )
+            steps.append(
+                {
+                    "step_index": 2,
+                    "intent": "Verify that a future heal action restores health to at least 90",
+                    "target_selector": None,
+                }
+            )
+        else:
+            steps.append(
+                {
+                    "step_index": 1,
+                    "intent": clamp_text(
+                        f"Health={health} is stable; prefer observation over action",
+                        MAX_PLAN_INTENT_LEN,
+                    ),
+                    "target_selector": None,
+                }
+            )
+    elif isinstance(web_state, dict):
+        title = str(web_state.get("title") or "")[:80]
+        mode = str(web_state.get("mode") or "unknown")[:40]
+        steps.append(
+            {
+                "step_index": 1,
+                "intent": clamp_text(
+                    f"Classify web arena mode={mode} title={title!r} before any future action",
+                    MAX_PLAN_INTENT_LEN,
+                ),
+                "target_selector": None,
+            }
+        )
+        for target in web_state.get("allowed_click_selectors") or []:
+            if isinstance(target, str) and target in ALLOWED_CLICK_TARGETS:
+                steps.append(
+                    {
+                        "step_index": len(steps),
+                        "intent": clamp_text(
+                            f"Candidate future selector is allowlisted: {target}",
+                            MAX_PLAN_INTENT_LEN,
+                        ),
+                        "target_selector": target,
+                    }
+                )
+                break
+        steps.append(
+            {
+                "step_index": len(steps),
+                "intent": "Verify future Web Arena last_error remains null after any action",
+                "target_selector": None,
+            }
+        )
+    else:
+        steps.append(
+            {
+                "step_index": 1,
+                "intent": "No recognized arena state; keep plan observational",
+                "target_selector": None,
+            }
+        )
+
+    if reason:
+        steps.append(
+            {
+                "step_index": len(steps),
+                "intent": clamp_text(
+                    f"Planner fallback reason: {reason}", MAX_PLAN_INTENT_LEN
+                ),
+                "target_selector": None,
+            }
+        )
+
+    return {
+        "tick": tick,
+        "plan_id": f"plan-{tick}",
+        "goal": goal,
+        "steps": steps[:MAX_PLAN_STEPS],
+    }
+
+
+def normalize_plan(
+    candidate: dict[str, Any], request: dict[str, Any], payload: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str | None]:
+    goal = candidate.get("goal")
+    if not isinstance(goal, str) or not goal.strip():
+        goal = payload.get("macro_goal")
+    if not isinstance(goal, str) or not goal.strip():
+        return None, "plan requires non-empty goal"
+
+    raw_steps = candidate.get("steps")
+    if not isinstance(raw_steps, list) or not raw_steps:
+        return None, "plan requires non-empty steps"
+    if len(raw_steps) > MAX_PLAN_STEPS:
+        return None, f"plan has too many steps: {len(raw_steps)}"
+
+    normalized_steps: list[dict[str, Any]] = []
+    for fallback_index, raw_step in enumerate(raw_steps):
+        if not isinstance(raw_step, dict):
+            return None, f"step {fallback_index} is not an object"
+        intent = raw_step.get("intent")
+        if not isinstance(intent, str) or not intent.strip():
+            return None, f"step {fallback_index} missing intent"
+
+        target_selector = raw_step.get("target_selector")
+        if target_selector is not None:
+            if not isinstance(target_selector, str):
+                return None, f"step {fallback_index} target_selector must be string or null"
+            target_selector = target_selector.strip()
+            if target_selector not in ALLOWED_CLICK_TARGETS:
+                return None, f"plan target not allowed: {target_selector}"
+
+        normalized_steps.append(
+            {
+                "step_index": safe_int(raw_step.get("step_index"), fallback_index),
+                "intent": clamp_text(intent, MAX_PLAN_INTENT_LEN),
+                "target_selector": target_selector,
+            }
+        )
+
+    tick = safe_int(candidate.get("tick"), safe_int(request.get("tick_id"), 0))
+    plan_id = candidate.get("plan_id")
+    if not isinstance(plan_id, str) or not plan_id.strip():
+        plan_id = f"plan-{tick}"
+
+    return {
+        "tick": tick,
+        "plan_id": clamp_identifier(plan_id, f"plan-{tick}"),
+        "goal": clamp_text(goal, MAX_PLAN_GOAL_LEN),
+        "steps": normalized_steps,
+    }, None
 
 
 def extract_first_json_object(text: str) -> str | None:
@@ -404,6 +586,15 @@ def clamp_text(text: str, max_len: int) -> str:
     return text[: max_len - 1] + "…"
 
 
+def clamp_identifier(value: str, fallback: str) -> str:
+    cleaned = "".join(
+        char for char in value.strip() if char.isalnum() or char in {"-", "_", "."}
+    )
+    if not cleaned:
+        return fallback
+    return cleaned[:80]
+
+
 def write_response(conn: socket.socket, task_id: str, status: str, action: str) -> None:
     response = {"task_id": task_id, "status": status, "action": action}
     try:
@@ -437,6 +628,64 @@ def run_selftest() -> None:
 
     fallback = fallback_action(request, payload, "fallback test")
     assert fallback["act"] == "click"
+
+    plan_payload = {"macro_goal": "heal the system without unsafe actions"}
+    plan = fallback_action(request, plan_payload)
+    assert plan["plan_id"] == "plan-7"
+    assert plan["steps"][0]["step_index"] == 0
+
+    fantasy_plan = fallback_action(
+        request,
+        {
+            "macro_goal": "heal the system without unsafe actions",
+            "fantasy_state": {"health": 40},
+        },
+    )
+    assert len(fantasy_plan["steps"]) >= 3
+    assert fantasy_plan["steps"][1]["target_selector"] == "#heal-btn"
+
+    plan_action, error = purify_action(
+        json.dumps(
+            {
+                "tick": 7,
+                "plan_id": "plan-demo",
+                "goal": "heal the system",
+                "steps": [
+                    {
+                        "step_index": 0,
+                        "intent": "observe health",
+                        "target_selector": None,
+                    }
+                ],
+            }
+        ),
+        request,
+        plan_payload,
+    )
+    assert error is None
+    assert plan_action is not None
+    assert plan_action["plan_id"] == "plan-demo"
+
+    invalid_plan, error = purify_action(
+        json.dumps(
+            {
+                "tick": 7,
+                "plan_id": "plan-bad",
+                "goal": "unsafe plan",
+                "steps": [
+                    {
+                        "step_index": 0,
+                        "intent": "touch unsafe selector",
+                        "target_selector": "#evil",
+                    }
+                ],
+            }
+        ),
+        request,
+        plan_payload,
+    )
+    assert invalid_plan is None
+    assert error == "plan target not allowed: #evil"
 
     failed_payload = {
         "fantasy_state": {"health": 40},

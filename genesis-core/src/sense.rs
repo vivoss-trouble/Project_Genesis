@@ -19,6 +19,11 @@ pub fn build_tick_payload(tick_id: u64, last_outcome: Option<serde_json::Value>)
         sense_key,
         read_state_url(&sense_url).unwrap_or(serde_json::Value::Null),
     );
+    if let Ok(goal) = std::env::var("GENESIS_MACRO_GOAL") {
+        if !goal.trim().is_empty() {
+            context.insert("macro_goal".to_string(), serde_json::json!(goal));
+        }
+    }
     if let Some(outcome) = last_outcome {
         context.insert("last_outcome".to_string(), outcome);
     }

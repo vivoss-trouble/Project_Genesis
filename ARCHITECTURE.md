@@ -102,6 +102,35 @@ GROUP BY status, failure_kind;
 
 从这一刻起，Genesis 不只会记录失败，还能按 `failure_kind`、`action_id` 和 `source_tick_id` 追问失败。
 
+## v3 第一刀：Planner Read Model
+
+Planner 不进入执行器，先进入黑匣子。
+
+当 Sense payload 中存在 `macro_goal` 时，Brain daemon 可以返回只读计划：
+
+```json
+{
+  "tick": 1,
+  "plan_id": "plan-1",
+  "goal": "restore system health",
+  "steps": [
+    {
+      "step_index": 0,
+      "intent": "observe health and available controls",
+      "target_selector": null
+    }
+  ]
+}
+```
+
+核心只做三件事：
+
+```text
+PlanDraft JSON -> PlanDrafted audit event -> SQLite plans/plan_steps projection
+```
+
+它不维护 `step_index` 游标，不激活步骤，不把 Plan 自动转换为 `GenesisAction`。这保证 v3 的大脑可以写作战图，但不能绕过 v2 的 `Act -> Verify -> Audit` 物理链路。
+
 ## 终极回路
 
 ```text

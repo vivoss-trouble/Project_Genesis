@@ -279,3 +279,32 @@ python3 scripts/project_audit_sqlite.py --rebuild --audit /tmp/genesis_taxonomy_
 ```
 
 结论：**PASS.** `failure_kind`、`action_id`、`OutcomeObserved` 已可用 SQL 查询；JSONL 仍是唯一真相源。
+
+## v3 Planner Read Model 冒烟验收
+
+目标：验证宏观目标可以被 Brain 生成只读 PlanDraft，并进入 Audit、Replay 和 SQLite Projection，但不会触发 Act。
+
+关键环境：
+
+```bash
+GENESIS_MACRO_GOAL="restore system health while respecting allowlists"
+```
+
+关键观测：
+
+```text
+PlanDrafted plan_id=plan-1 source_tick_id=1 steps=1
+Replay strict: tick 2 source_tick 1 plan plan-1 goal="restore system health while respecting allowlists" steps=1
+SQLite: ('plan-1', 'restore system health while respecting allowlists', 0, 'restore system health while respecting allowlists', None)
+```
+
+复杂宏目标烟测：
+
+```text
+GENESIS_MACRO_GOAL="Handle a drifting healing target under falling health: observe health, identify an allowlisted heal control, avoid repeating failed actions, and verify recovery through the existing v2 loop"
+PlanDrafted plan_id=plan-1 steps=2
+Replay strict prints both steps
+SQLite projects both rows into plan_steps
+```
+
+结论：**PASS.** v3 第一刀只建立 Planner Read Model；核心没有执行 cursor，没有 `StepActivated`，没有自动动作派发。

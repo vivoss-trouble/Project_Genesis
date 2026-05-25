@@ -5,11 +5,12 @@ use genesis_contracts::wire::{
     GenesisResponse, GenesisSlice,
 };
 use libloading::{Library, Symbol};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::act::{ActDispatcher, BrainActionEnvelope};
-use crate::audit::{AuditEvent, AuditLogger, VerificationResult};
+use crate::audit::{AuditEvent, AuditLogger, PlanStep, VerificationResult};
 use crate::verify::verify_action;
 use crate::watchdog::PluginWorker;
 
@@ -231,6 +232,25 @@ fn dispatch_brain_action(
     act_dispatcher: &ActDispatcher,
     auditor: &AuditLogger,
 ) {
+    if let Ok(plan) = serde_json::from_str::<PlanDraftEnvelope>(action_data) {
+        println!(
+            "[Planner] 🧭 Tick {} drafted plan {} source Tick {} goal={} steps={}",
+            tick_id,
+            plan.plan_id,
+            plan.tick,
+            plan.goal,
+            plan.steps.len()
+        );
+        auditor.log(AuditEvent::PlanDrafted {
+            tick_id,
+            source_tick_id: plan.tick,
+            plan_id: plan.plan_id,
+            goal: plan.goal,
+            steps: plan.steps,
+        });
+        return;
+    }
+
     match serde_json::from_str::<BrainActionEnvelope>(action_data) {
         Ok(decision) => {
             let action_id = act_dispatcher.next_action_id(tick_id);
@@ -258,6 +278,14 @@ fn dispatch_brain_action(
             });
         }
     }
+}
+
+#[derive(Deserialize)]
+struct PlanDraftEnvelope {
+    tick: u64,
+    plan_id: String,
+    goal: String,
+    steps: Vec<PlanStep>,
 }
 
 fn current_timestamp_ms() -> u64 {

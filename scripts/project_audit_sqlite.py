@@ -76,6 +76,23 @@ CREATE TABLE IF NOT EXISTS actions (
     reason TEXT
 );
 
+CREATE TABLE IF NOT EXISTS plans (
+    plan_id TEXT PRIMARY KEY,
+    tick_id INTEGER NOT NULL,
+    source_tick_id INTEGER,
+    timestamp_ms INTEGER NOT NULL,
+    goal TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS plan_steps (
+    plan_id TEXT NOT NULL,
+    step_index INTEGER NOT NULL,
+    intent TEXT NOT NULL,
+    target_selector TEXT,
+    PRIMARY KEY (plan_id, step_index),
+    FOREIGN KEY(plan_id) REFERENCES plans(plan_id)
+);
+
 CREATE TABLE IF NOT EXISTS outcomes (
     action_id TEXT PRIMARY KEY,
     tick_id INTEGER NOT NULL,
@@ -106,6 +123,7 @@ CREATE TABLE IF NOT EXISTS replay_snapshots (
 CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_records(event_type);
 CREATE INDEX IF NOT EXISTS idx_plugin_responses_plugin ON plugin_responses(plugin_id);
 CREATE INDEX IF NOT EXISTS idx_actions_act ON actions(act);
+CREATE INDEX IF NOT EXISTS idx_plan_steps_target ON plan_steps(target_selector);
 CREATE INDEX IF NOT EXISTS idx_outcomes_status ON outcomes(status);
 CREATE INDEX IF NOT EXISTS idx_outcomes_failure_kind ON outcomes(failure_kind);
 CREATE INDEX IF NOT EXISTS idx_failures_component ON failures(component);
@@ -213,6 +231,8 @@ def project_event(
         )
     elif event_type == "BrainActionDecoded":
         project_brain_action(conn, timestamp_ms, payload)
+    elif event_type == "PlanDrafted":
+        project_plan(conn, timestamp_ms, payload)
     elif event_type == "ActionDispatched":
         conn.execute(
             """
@@ -328,6 +348,51 @@ def project_brain_action(
     )
 
 
+def project_plan(
+    conn: sqlite3.Connection, timestamp_ms: int, payload: dict[str, Any]
+) -> None:
+    plan_id = payload.get("plan_id")
+    if not isinstance(plan_id, str) or not plan_id:
+        return
+
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO plans
+            (plan_id, tick_id, source_tick_id, timestamp_ms, goal)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            plan_id,
+            payload.get("tick_id"),
+            payload.get("source_tick_id"),
+            timestamp_ms,
+            payload.get("goal"),
+        ),
+    )
+    conn.execute("DELETE FROM plan_steps WHERE plan_id = ?", (plan_id,))
+
+    steps = payload.get("steps") or []
+    if not isinstance(steps, list):
+        return
+
+    for fallback_index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO plan_steps
+                (plan_id, step_index, intent, target_selector)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                plan_id,
+                step.get("step_index", fallback_index),
+                step.get("intent"),
+                step.get("target_selector"),
+            ),
+        )
+
+
 def project_outcome(
     conn: sqlite3.Connection, timestamp_ms: int, payload: dict[str, Any]
 ) -> None:
@@ -423,6 +488,23 @@ def run_selftest() -> None:
             },
         },
         {
+            "timestamp_ms": 6,
+            "type": "PlanDrafted",
+            "payload": {
+                "tick_id": 3,
+                "source_tick_id": 2,
+                "plan_id": "plan-2",
+                "goal": "inspect web state",
+                "steps": [
+                    {
+                        "step_index": 0,
+                        "intent": "observe web title",
+                        "target_selector": None,
+                    }
+                ],
+            },
+        },
+        {
             "timestamp_ms": 5,
             "type": "OutcomeObserved",
             "payload": {
@@ -458,11 +540,19 @@ def run_selftest() -> None:
         sense = conn.execute(
             "SELECT last_outcome_status FROM senses WHERE tick_id=2"
         ).fetchone()
+        plan = conn.execute(
+            "SELECT goal FROM plans WHERE plan_id='plan-2'"
+        ).fetchone()
+        step = conn.execute(
+            "SELECT intent FROM plan_steps WHERE plan_id='plan-2' AND step_index=0"
+        ).fetchone()
         conn.close()
 
     assert count == len(records)
     assert outcome == ("Failed", "ReadOnlyMode")
     assert sense == ("Failed",)
+    assert plan == ("inspect web state",)
+    assert step == ("observe web title",)
     print("[audit-sqlite] selftest passed")
 
 

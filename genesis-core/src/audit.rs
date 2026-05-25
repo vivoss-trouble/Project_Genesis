@@ -35,6 +35,13 @@ pub enum AuditEvent {
         action_id: String,
         action_json: String,
     },
+    PlanDrafted {
+        tick_id: u64,
+        source_tick_id: u64,
+        plan_id: String,
+        goal: String,
+        steps: Vec<PlanStep>,
+    },
     ActionDispatched {
         tick_id: u64,
         source_tick_id: u64,
@@ -65,6 +72,13 @@ pub enum AuditEvent {
         label: String,
         path: String,
     },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PlanStep {
+    pub step_index: u32,
+    pub intent: String,
+    pub target_selector: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

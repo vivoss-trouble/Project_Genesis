@@ -130,6 +130,36 @@ fn strict_audit(records: &[AuditRecord]) -> Result<(), String> {
                     value_str(&record.payload, "action_json").unwrap_or("")
                 );
             }
+            "PlanDrafted" => {
+                println!(
+                    "[{}] tick {} source_tick {} plan {} goal={:?} steps={}",
+                    record.timestamp_ms,
+                    value_u64(&record.payload, "tick_id").unwrap_or_default(),
+                    value_u64(&record.payload, "source_tick_id").unwrap_or_default(),
+                    value_str(&record.payload, "plan_id").unwrap_or("<no-plan-id>"),
+                    value_str(&record.payload, "goal").unwrap_or(""),
+                    record
+                        .payload
+                        .get("steps")
+                        .and_then(Value::as_array)
+                        .map(|steps| steps.len())
+                        .unwrap_or_default()
+                );
+                if let Some(steps) = record.payload.get("steps").and_then(Value::as_array) {
+                    for step in steps {
+                        println!(
+                            "    step {} intent={:?} target={}",
+                            step.get("step_index")
+                                .and_then(Value::as_u64)
+                                .unwrap_or_default(),
+                            step.get("intent").and_then(Value::as_str).unwrap_or(""),
+                            step.get("target_selector")
+                                .map(Value::to_string)
+                                .unwrap_or_else(|| "null".to_string())
+                        );
+                    }
+                }
+            }
             "ReplaySnapshot" => {
                 println!(
                     "[{}] replay snapshot {} {}",
