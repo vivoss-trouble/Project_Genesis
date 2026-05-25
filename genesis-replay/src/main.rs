@@ -160,6 +160,16 @@ fn strict_audit(records: &[AuditRecord]) -> Result<(), String> {
                     }
                 }
             }
+            "MemoryAdvisoryAttached" => {
+                println!(
+                    "[{}] tick {} memory advisory scope={} samples={} hash={}",
+                    record.timestamp_ms,
+                    value_u64(&record.payload, "tick_id").unwrap_or_default(),
+                    value_str(&record.payload, "scope").unwrap_or("<no-scope>"),
+                    value_u64(&record.payload, "sample_count").unwrap_or_default(),
+                    value_str(&record.payload, "hash").unwrap_or("<no-hash>")
+                );
+            }
             "PlanActivated" => {
                 println!(
                     "[{}] tick {} plan {} activated",

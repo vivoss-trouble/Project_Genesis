@@ -119,6 +119,14 @@ CREATE TABLE IF NOT EXISTS outcomes (
     evidence_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS memory_advisories (
+    tick_id INTEGER NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    scope TEXT NOT NULL,
+    sample_count INTEGER NOT NULL,
+    advisory_hash TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS failures (
     tick_id INTEGER,
     timestamp_ms INTEGER NOT NULL,
@@ -140,6 +148,7 @@ CREATE INDEX IF NOT EXISTS idx_plan_events_plan ON plan_events(plan_id);
 CREATE INDEX IF NOT EXISTS idx_plan_events_type ON plan_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_outcomes_status ON outcomes(status);
 CREATE INDEX IF NOT EXISTS idx_outcomes_failure_kind ON outcomes(failure_kind);
+CREATE INDEX IF NOT EXISTS idx_memory_advisories_scope ON memory_advisories(scope);
 CREATE INDEX IF NOT EXISTS idx_failures_component ON failures(component);
 """
 
@@ -245,6 +254,21 @@ def project_event(
         )
     elif event_type == "BrainActionDecoded":
         project_brain_action(conn, timestamp_ms, payload)
+    elif event_type == "MemoryAdvisoryAttached":
+        conn.execute(
+            """
+            INSERT INTO memory_advisories
+                (tick_id, timestamp_ms, scope, sample_count, advisory_hash)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                payload.get("tick_id"),
+                timestamp_ms,
+                payload.get("scope"),
+                payload.get("sample_count"),
+                payload.get("hash"),
+            ),
+        )
     elif event_type == "PlanDrafted":
         project_plan(conn, timestamp_ms, payload)
     elif event_type in {
@@ -516,6 +540,16 @@ def run_selftest() -> None:
         },
         {
             "timestamp_ms": 3,
+            "type": "MemoryAdvisoryAttached",
+            "payload": {
+                "tick_id": 1,
+                "scope": "active_step_target",
+                "sample_count": 3,
+                "hash": "abc123",
+            },
+        },
+        {
+            "timestamp_ms": 4,
             "type": "BrainActionDecoded",
             "payload": {
                 "tick_id": 1,
@@ -527,7 +561,7 @@ def run_selftest() -> None:
             },
         },
         {
-            "timestamp_ms": 4,
+            "timestamp_ms": 5,
             "type": "ActionDispatched",
             "payload": {
                 "tick_id": 1,
@@ -536,7 +570,7 @@ def run_selftest() -> None:
             },
         },
         {
-            "timestamp_ms": 6,
+            "timestamp_ms": 7,
             "type": "PlanDrafted",
             "payload": {
                 "tick_id": 3,
@@ -553,12 +587,12 @@ def run_selftest() -> None:
             },
         },
         {
-            "timestamp_ms": 7,
+            "timestamp_ms": 8,
             "type": "PlanActivated",
             "payload": {"tick_id": 3, "plan_id": "plan-2"},
         },
         {
-            "timestamp_ms": 8,
+            "timestamp_ms": 9,
             "type": "StepActivated",
             "payload": {
                 "tick_id": 3,
@@ -568,7 +602,7 @@ def run_selftest() -> None:
             },
         },
         {
-            "timestamp_ms": 5,
+            "timestamp_ms": 6,
             "type": "OutcomeObserved",
             "payload": {
                 "tick_id": 2,
@@ -612,6 +646,9 @@ def run_selftest() -> None:
         event = conn.execute(
             "SELECT event_type, step_index FROM plan_events WHERE plan_id='plan-2' AND event_type='StepActivated'"
         ).fetchone()
+        advisory = conn.execute(
+            "SELECT scope, sample_count, advisory_hash FROM memory_advisories WHERE tick_id=1"
+        ).fetchone()
         conn.close()
 
     assert count == len(records)
@@ -620,6 +657,7 @@ def run_selftest() -> None:
     assert plan == ("inspect web state",)
     assert step == ("observe web title",)
     assert event == ("StepActivated", 0)
+    assert advisory == ("active_step_target", 3, "abc123")
     print("[audit-sqlite] selftest passed")
 
 

@@ -35,6 +35,12 @@ pub enum AuditEvent {
         action_id: String,
         action_json: String,
     },
+    MemoryAdvisoryAttached {
+        tick_id: u64,
+        scope: String,
+        sample_count: u64,
+        hash: String,
+    },
     PlanDrafted {
         tick_id: u64,
         source_tick_id: u64,

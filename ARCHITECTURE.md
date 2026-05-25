@@ -185,6 +185,45 @@ v3.3 将 `wait` 从“已投递即成功”的空动作收敛为带有物理预�
 - 条件兑现则 `Verified -> PlanAdvanced`。
 - 条件未兑现则 `WaitConditionNotMet -> PlanAborted`，由 Brain 决定是否重规划。
 
+## v3 第四刀：只读历史建议
+
+v3.4 允许历史开口说话，但不给历史一双手。
+
+Python Brain daemon 可以在配置 `GENESIS_ADVISORY_DB` 时，对 SQLite 投影执行固定模板、只读、限量且限时的查询。当前唯一作用域是当前 `active_step.target_selector`，输出仅包含低熵统计摘要：
+
+```json
+{
+  "scope": "active_step_target",
+  "target_selector": "a",
+  "sample_count": 12,
+  "recent_failures": {"WaitConditionNotMet": 3},
+  "last_verified_action": "wait"
+}
+```
+
+这份 advisory 只进入模型 prompt，并明确服从当前 Sense 和所有 allowlist。历史故障类型只允许固定分类集，未知内容折叠为 `Other`，不能借投影数据库向 prompt 回灌任意字符串。它不是 `GenesisAction`，不能触发物理执行，数据库不可用时也不会中断现有 JIT/Verify 链路。
+
+当 advisory 确实存在时，daemon 通过兼容的可选响应包裹体返回审计印章：
+
+```json
+{
+  "action": {
+    "tick": 9,
+    "act": "wait",
+    "ms": 1000,
+    "expected_state": {"type": "element_visible", "selector": "a"},
+    "reason": "wait for allowlisted target"
+  },
+  "advisory_meta": {
+    "scope": "active_step_target",
+    "sample_count": 12,
+    "hash": "a1b2c3d4e5f60718"
+  }
+}
+```
+
+核心不查询 SQLite，也不把历史注入 Sense。它仅校验有界元数据，记录 `MemoryAdvisoryAttached`，然后将内层 action 送回既有 Purifier 后的 Act/Verify 物理链路。SQLite 投影可重建这枚印章，用于回答“一次决策是否参考过历史统计”，而不复制原始历史上下文。
+
 ## 终极回路
 
 ```text

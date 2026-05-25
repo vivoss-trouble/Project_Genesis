@@ -41,6 +41,7 @@ python3 scripts/project_audit_sqlite.py --selftest
 - `plan_steps`: v3 plan steps keyed by `(plan_id, step_index)`.
 - `plan_events`: v3 cursor lifecycle events such as `PlanActivated`, `StepActivated`, `PlanAdvanced`, and `PlanAborted`.
 - `outcomes`: `OutcomeObserved` result, reason, `failure_kind`, policy, target, and evidence.
+- `memory_advisories`: v3.4 prompt-only history advisory audit stamps (`scope`, bounded sample count, and digest).
 - `failures`: non-action component failures.
 - `replay_snapshots`: replay anchor snapshots.
 
@@ -86,6 +87,14 @@ SELECT
   web_mode
 FROM senses
 WHERE last_outcome_status IS NOT NULL;
+```
+
+Prompt-only historical advisory attachment checks:
+
+```sql
+SELECT tick_id, scope, sample_count, advisory_hash
+FROM memory_advisories
+ORDER BY timestamp_ms DESC;
 ```
 
 ## Smoke Evidence

@@ -423,7 +423,25 @@ fn dispatch_brain_action(
     allow_plan_draft: bool,
     allow_action_dispatch: bool,
 ) -> BrainDispatch {
-    if let Ok(plan) = serde_json::from_str::<PlanDraftEnvelope>(action_data) {
+    let (decision_data, advisory_meta) = unwrap_brain_decision(action_data);
+    if let Some(meta) = advisory_meta {
+        if meta.is_valid() {
+            auditor.log(AuditEvent::MemoryAdvisoryAttached {
+                tick_id,
+                scope: meta.scope,
+                sample_count: meta.sample_count,
+                hash: meta.hash,
+            });
+        } else {
+            auditor.log(AuditEvent::FailureObserved {
+                tick_id,
+                component: "MemoryAdvisoryDecoder".to_string(),
+                error: "invalid advisory metadata envelope".to_string(),
+            });
+        }
+    }
+
+    if let Ok(plan) = serde_json::from_str::<PlanDraftEnvelope>(&decision_data) {
         if allow_plan_draft {
             return BrainDispatch::Plan(plan);
         }
@@ -438,7 +456,7 @@ fn dispatch_brain_action(
         return BrainDispatch::None;
     }
 
-    match serde_json::from_str::<BrainActionEnvelope>(action_data) {
+    match serde_json::from_str::<BrainActionEnvelope>(&decision_data) {
         Ok(decision) => {
             if !allow_action_dispatch {
                 auditor.log(AuditEvent::FailureObserved {
@@ -466,7 +484,7 @@ fn dispatch_brain_action(
                 tick_id,
                 source_tick_id: decision.tick,
                 action_id: action_id.clone(),
-                action_json: action_data.to_string(),
+                action_json: decision_data,
             });
             if act_dispatcher.dispatch_reserved(
                 tick_id,
@@ -480,7 +498,7 @@ fn dispatch_brain_action(
         Err(err) => {
             println!(
                 "[Act Dispatcher] 🚨 Brain generated invalid action JSON: {} | raw={}",
-                err, action_data
+                err, decision_data
             );
             auditor.log(AuditEvent::FailureObserved {
                 tick_id,
@@ -491,6 +509,39 @@ fn dispatch_brain_action(
     }
 
     BrainDispatch::None
+}
+
+fn unwrap_brain_decision(action_data: &str) -> (String, Option<AdvisoryMeta>) {
+    let Ok(packet) = serde_json::from_str::<BrainDecisionPacket>(action_data) else {
+        return (action_data.to_string(), None);
+    };
+
+    (
+        serde_json::to_string(&packet.action).unwrap_or_else(|_| action_data.to_string()),
+        packet.advisory_meta,
+    )
+}
+
+#[derive(Deserialize)]
+struct BrainDecisionPacket {
+    action: serde_json::Value,
+    advisory_meta: Option<AdvisoryMeta>,
+}
+
+#[derive(Deserialize)]
+struct AdvisoryMeta {
+    scope: String,
+    sample_count: u64,
+    hash: String,
+}
+
+impl AdvisoryMeta {
+    fn is_valid(&self) -> bool {
+        self.scope == "active_step_target"
+            && self.sample_count <= 100
+            && self.hash.len() == 16
+            && self.hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }
 }
 
 #[derive(Deserialize)]
@@ -537,4 +588,41 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unwrap_brain_decision;
+    use serde_json::json;
+
+    #[test]
+    fn keeps_plain_brain_action_backward_compatible() {
+        let action = r#"{"tick":7,"act":"noop","reason":"observe"}"#;
+        let (decoded, advisory) = unwrap_brain_decision(action);
+
+        assert_eq!(decoded, action);
+        assert!(advisory.is_none());
+    }
+
+    #[test]
+    fn unwraps_advisory_without_merging_it_into_action_data() {
+        let packet = r#"{"action":{"tick":7,"act":"noop","reason":"observe"},"advisory_meta":{"scope":"active_step_target","sample_count":2,"hash":"0123456789abcdef"}}"#;
+        let (decoded, advisory) = unwrap_brain_decision(packet);
+        let advisory = advisory.expect("advisory metadata");
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&decoded).expect("action JSON"),
+            json!({"tick": 7, "act": "noop", "reason": "observe"})
+        );
+        assert!(advisory.is_valid());
+        assert!(!decoded.contains("advisory_meta"));
+    }
+
+    #[test]
+    fn rejects_unbounded_advisory_metadata() {
+        let packet = r#"{"action":{"tick":7,"act":"noop","reason":"observe"},"advisory_meta":{"scope":"active_step_target","sample_count":101,"hash":"0123456789abcdef"}}"#;
+        let (_, advisory) = unwrap_brain_decision(packet);
+
+        assert!(!advisory.expect("advisory metadata").is_valid());
+    }
 }
