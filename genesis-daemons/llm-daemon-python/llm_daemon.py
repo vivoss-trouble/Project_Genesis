@@ -48,6 +48,7 @@ ALLOWED_ACTS = {
     "type",
     "key",
     "wait",
+    "aim_dynamic",
     "click_point",
     "assert_ui_state",
 }
@@ -192,7 +193,12 @@ class DynamicAdvisoryValidationModel:
                 "reason": "dynamic advisory reports repeated drift or stale frames; stand down for replan",
             }
         else:
-            result = dynamic_control_click_point(state, target_id)
+            result = {
+                "tick": safe_int(state.get("tick_id") if isinstance(state, dict) else 1, 1),
+                "act": "aim_dynamic",
+                "target_id": target_id,
+                "reason": "validation model delegates coordinates to geometric shooter",
+            }
 
         return {"choices": [{"text": json.dumps(result)}]}
 
@@ -372,9 +378,11 @@ def system_prompt() -> str:
         'or {"tick":1,"act":"noop","reason":"state stable"} '
         'or {"tick":1,"act":"wait","ms":1000,"expected_state":'
         '{"type":"element_visible","selector":"#selector"},"reason":"wait for element"}. '
-        'For dynamic_state active steps, you may return {"tick":1,"act":"click_point",'
-        '"target_id":"heal","x":312.0,"y":188.0,"frame_id":1842,'
-        '"reason":"target visible in committed frame"}. '
+        'For dynamic_state active steps, you MUST return {"tick":1,"act":"aim_dynamic",'
+        '"target_id":"heal","reason":"target is the tactical objective"}. '
+        "Do not return click_point for dynamic_state active steps; click_point is "
+        "reserved for the local geometric shooter, which will convert aim_dynamic "
+        "to the freshest coordinates and frame_id. "
         "For dynamic_state, target_selector and click_point.target_id must use raw "
         "arena target IDs from dynamic_state.targets[].id, e.g. \"heal\"; never CSS "
         "selectors such as \"#heal\". CSS selector syntax only applies to web/fantasy "
@@ -690,7 +698,7 @@ def fallback_step_action(
 
     dynamic_state = payload.get("dynamic_state")
     if isinstance(dynamic_state, dict):
-        dynamic_action = fallback_dynamic_click_point(tick, target, dynamic_state, intent)
+        dynamic_action = fallback_dynamic_aim(tick, target, dynamic_state, intent)
         if dynamic_action is not None:
             if repeats_failed_action(dynamic_action, failed_last_action(payload)):
                 return noop_after_failed_repeat(request, failed_last_action(payload))
@@ -1024,7 +1032,28 @@ def normalize_action(
             return None, "repeated exact failed action"
         return normalized, None
 
+    if act == "aim_dynamic":
+        target_id = action.get("target_id")
+        if not isinstance(target_id, str):
+            return None, "aim_dynamic target_id must be string"
+        target_id = target_id.strip()
+        if not target_id or len(target_id) > TARGET_ID_MAX_LEN:
+            return None, f"aim_dynamic target_id outside 1..{TARGET_ID_MAX_LEN}"
+        if target_id not in ALLOWED_CLICK_TARGETS:
+            return None, f"aim_dynamic target_id not allowed: {target_id}"
+        normalized = {
+            "tick": tick,
+            "act": "aim_dynamic",
+            "target_id": target_id,
+            "reason": reason or "model chose aim_dynamic",
+        }
+        if repeats_failed_action(normalized, failed_last_action(payload)):
+            return None, "repeated exact failed action"
+        return normalized, None
+
     if act == "click_point":
+        if contains_active_step(payload) and isinstance(payload.get("dynamic_state"), dict):
+            return None, "dynamic active_step requires aim_dynamic, not click_point"
         target_id = action.get("target_id")
         if not isinstance(target_id, str):
             return None, "click_point target_id must be string"
@@ -1229,13 +1258,11 @@ def dynamic_target_ids(dynamic_state: dict[str, Any]) -> list[str]:
     return result
 
 
-def fallback_dynamic_click_point(
-    tick: int, target_id: str, dynamic_state: dict[str, Any], intent: str
-) -> dict[str, Any] | None:
+def dynamic_target(dynamic_state: dict[str, Any], target_id: str) -> dict[str, Any] | None:
     targets = dynamic_state.get("targets")
     if not isinstance(targets, list):
         return None
-    target = next(
+    return next(
         (
             item
             for item in targets
@@ -1248,6 +1275,12 @@ def fallback_dynamic_click_point(
         ),
         None,
     )
+
+
+def fallback_dynamic_click_point(
+    tick: int, target_id: str, dynamic_state: dict[str, Any], intent: str
+) -> dict[str, Any] | None:
+    target = dynamic_target(dynamic_state, target_id)
     if target is None:
         return None
 
@@ -1275,6 +1308,19 @@ def fallback_dynamic_click_point(
         "y": y,
         "frame_id": frame_id,
         "reason": clamp_text(f"dynamic active_step compiled: {intent}", MAX_REASON_LEN),
+    }
+
+
+def fallback_dynamic_aim(
+    tick: int, target_id: str, dynamic_state: dict[str, Any], intent: str
+) -> dict[str, Any] | None:
+    if dynamic_target(dynamic_state, target_id) is None:
+        return None
+    return {
+        "tick": tick,
+        "act": "aim_dynamic",
+        "target_id": target_id,
+        "reason": clamp_text(f"dynamic active_step aims: {intent}", MAX_REASON_LEN),
     }
 
 
@@ -1402,11 +1448,46 @@ def run_selftest() -> None:
     ALLOWED_CLICK_TARGETS.add("heal")
     try:
         rules = context_rules(dynamic_rules_payload)
+        aim_action, error = purify_action(
+            '{"act":"aim_dynamic","target_id":"heal","reason":"delegate coordinates"}',
+            request,
+            dynamic_rules_payload,
+        )
+        assert error is None
+        assert aim_action is not None and aim_action["act"] == "aim_dynamic"
     finally:
         if not had_heal_target:
             ALLOWED_CLICK_TARGETS.discard("heal")
     assert "Current raw target IDs: heal" in rules
     assert "Never prefix dynamic target IDs with '#'" in rules
+
+    dynamic_active_payload = {
+        "active_step": {
+            "step_index": 0,
+            "intent": "aim at heal target",
+            "target_selector": "heal",
+        },
+        "dynamic_state": {
+            "frame_id": 43,
+            "targets": [{"id": "heal", "x": 10, "y": 20, "w": 30, "h": 10}],
+        },
+    }
+    had_heal_target = "heal" in ALLOWED_CLICK_TARGETS
+    ALLOWED_CLICK_TARGETS.add("heal")
+    try:
+        direct_click_point, error = purify_action(
+            '{"act":"click_point","target_id":"heal","x":25,"y":25,"frame_id":43,"reason":"too early"}',
+            request,
+            dynamic_active_payload,
+        )
+        assert direct_click_point is None
+        assert error == "dynamic active_step requires aim_dynamic, not click_point"
+        dynamic_fallback = fallback_action(request, dynamic_active_payload)
+        assert dynamic_fallback["act"] == "aim_dynamic"
+        assert dynamic_fallback["target_id"] == "heal"
+    finally:
+        if not had_heal_target:
+            ALLOWED_CLICK_TARGETS.discard("heal")
 
     active_payload = {
         "macro_goal": "heal the system without unsafe actions",
