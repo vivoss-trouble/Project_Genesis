@@ -34,6 +34,15 @@ Install Playwright for real browser-backed DOM actions:
 
 Without Playwright, the daemon falls back to read-only HTTP probe mode. This keeps Sense and Audit testable while preventing physical clicks.
 
+Force the same no-actuation mode deterministically, even on machines with Playwright installed:
+
+```bash
+GENESIS_WEB_FORCE_READ_ONLY=1 \
+GENESIS_WEB_URL=https://example.com \
+GENESIS_WEB_ALLOWED_SELECTORS=a \
+python3 genesis-daemons/web-arena-python/web_arena.py
+```
+
 Minimal live-fire DOM click:
 
 ```bash

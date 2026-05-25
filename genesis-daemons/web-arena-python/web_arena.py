@@ -52,6 +52,7 @@ OBSERVED_SELECTORS = set(
 )
 ALLOWED_CLICK_SELECTORS = set(csv_env("GENESIS_WEB_ALLOWED_SELECTORS", ""))
 HEADLESS = os.environ.get("GENESIS_WEB_HEADLESS", "1") != "0"
+FORCE_READ_ONLY = os.environ.get("GENESIS_WEB_FORCE_READ_ONLY", "0") == "1"
 STATE_TIMEOUT_MS = int(os.environ.get("GENESIS_WEB_STATE_TIMEOUT_MS", "300"))
 ACTION_TIMEOUT_MS = int(os.environ.get("GENESIS_WEB_ACTION_TIMEOUT_MS", "3000"))
 REFRESH_INTERVAL_SEC = float(os.environ.get("GENESIS_WEB_REFRESH_SEC", "1.0"))
@@ -112,6 +113,13 @@ def main() -> None:
 
 
 def start_browser_or_probe(state: ArenaState) -> None:
+    if FORCE_READ_ONLY:
+        with state.lock:
+            state.mode = "http_probe"
+        state.log("forced read-only HTTP probe mode")
+        refresh_http_probe(state)
+        return
+
     try:
         from playwright.sync_api import sync_playwright  # type: ignore
     except Exception as exc:
