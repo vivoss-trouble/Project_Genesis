@@ -192,6 +192,8 @@ class DynamicAdvisoryValidationModel:
                 "act": "noop",
                 "reason": "dynamic advisory reports repeated drift or stale frames; stand down for replan",
             }
+        elif os.environ.get("GENESIS_DYNAMIC_ADVISORY_CONTROL_ACTION") == "click_point":
+            result = dynamic_control_click_point(state, target_id)
         else:
             result = {
                 "tick": safe_int(state.get("tick_id") if isinstance(state, dict) else 1, 1),
@@ -698,7 +700,10 @@ def fallback_step_action(
 
     dynamic_state = payload.get("dynamic_state")
     if isinstance(dynamic_state, dict):
-        dynamic_action = fallback_dynamic_aim(tick, target, dynamic_state, intent)
+        if os.environ.get("GENESIS_DYNAMIC_FALLBACK_ACTION") == "click_point":
+            dynamic_action = fallback_dynamic_click_point(tick, target, dynamic_state, intent)
+        else:
+            dynamic_action = fallback_dynamic_aim(tick, target, dynamic_state, intent)
         if dynamic_action is not None:
             if repeats_failed_action(dynamic_action, failed_last_action(payload)):
                 return noop_after_failed_repeat(request, failed_last_action(payload))

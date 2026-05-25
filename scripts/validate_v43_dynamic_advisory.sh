@@ -105,6 +105,9 @@ run_case() {
             > "/tmp/genesis_v43_${label}_llm.log" 2>&1 &
     else
         GENESIS_TEST_DYNAMIC_ADVISORY_MODEL=1 \
+        GENESIS_DYNAMIC_ADVISORY_CONTROL_ACTION=click_point \
+        GENESIS_DYNAMIC_FALLBACK_ACTION=click_point \
+        GENESIS_DYNAMIC_FALLBACK_MODE=drift \
         GENESIS_ALLOWED_CLICK_TARGETS=heal \
         GENESIS_ALLOWED_WAIT_SELECTORS=heal \
         GENESIS_LLM_LATENCY_SEC=0 \

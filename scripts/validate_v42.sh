@@ -98,6 +98,7 @@ run_dynamic_case() {
     GENESIS_MODEL_PATH="" \
     GENESIS_ALLOWED_CLICK_TARGETS=heal \
     GENESIS_ALLOWED_WAIT_SELECTORS=heal \
+    GENESIS_DYNAMIC_FALLBACK_ACTION=click_point \
     GENESIS_DYNAMIC_FALLBACK_MODE="$fallback_mode" \
     GENESIS_LLM_LATENCY_SEC=0 \
         "$PYTHON_BIN" genesis-daemons/llm-daemon-python/llm_daemon.py \

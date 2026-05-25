@@ -170,6 +170,8 @@ def main() -> None:
     print(f"[audit-sqlite] projected {count} records into {db_path}")
     if args.telemetry_report:
         print_telemetry_report(db_path)
+    if args.assert_v46_baseline:
+        assert_v46_baseline(db_path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -192,6 +194,11 @@ def parse_args() -> argparse.Namespace:
         "--telemetry-report",
         action="store_true",
         help="print a live-fire telemetry report after projection",
+    )
+    parser.add_argument(
+        "--assert-v46-baseline",
+        action="store_true",
+        help="assert the v4.6 cerebellum shooter deterministic baseline",
     )
     return parser.parse_args()
 
@@ -670,6 +677,99 @@ def print_mapping(label: str, values: dict[str, int]) -> None:
         return
     rendered = ", ".join(f"{key}={value}" for key, value in values.items())
     print(f"{label} {rendered}")
+
+
+def assert_v46_baseline(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        click_points = scalar(
+            conn,
+            """
+            SELECT COUNT(*)
+            FROM actions
+            WHERE act = 'click_point'
+            """,
+        )
+        if click_points <= 0:
+            raise SystemExit("[v4.6-assert] expected at least one click_point action")
+
+        non_cerebellum = scalar(
+            conn,
+            """
+            SELECT COUNT(*)
+            FROM actions
+            WHERE act = 'click_point'
+              AND COALESCE(reason, '') NOT LIKE 'cerebellum shooter resolved:%'
+            """,
+        )
+        if non_cerebellum:
+            raise SystemExit(
+                f"[v4.6-assert] found {non_cerebellum} click_point action(s) not resolved by cerebellum"
+            )
+
+        stale_frames = scalar(
+            conn,
+            """
+            SELECT COUNT(*)
+            FROM outcomes
+            WHERE failure_kind = 'StaleFrame'
+            """,
+        )
+        if stale_frames:
+            raise SystemExit(
+                f"[v4.6-assert] expected zero StaleFrame outcomes, found {stale_frames}"
+            )
+
+        max_frame_delta = scalar(
+            conn,
+            """
+            SELECT COALESCE(MAX(json_extract(evidence_json, '$.frame_delta')), 0)
+            FROM outcomes
+            WHERE action_id IN (
+                SELECT action_id FROM actions WHERE act = 'click_point'
+            )
+            """,
+        )
+        if max_frame_delta > 2:
+            raise SystemExit(
+                f"[v4.6-assert] expected max frame_delta <= 2, found {max_frame_delta}"
+            )
+
+        verified = scalar(
+            conn,
+            """
+            SELECT COUNT(*)
+            FROM outcomes
+            WHERE status = 'Verified'
+              AND action_id IN (
+                  SELECT action_id FROM actions WHERE act = 'click_point'
+              )
+            """,
+        )
+        if verified <= 0:
+            raise SystemExit(
+                "[v4.6-assert] expected at least one verified cerebellum click_point"
+            )
+
+        fallback_actions = scalar(
+            conn,
+            """
+            SELECT COUNT(*)
+            FROM actions
+            WHERE reason LIKE 'fallback after invalid model output:%'
+            """
+        )
+        if fallback_actions:
+            raise SystemExit(
+                f"[v4.6-assert] expected zero purifier fallback actions, found {fallback_actions}"
+            )
+    finally:
+        conn.close()
+
+    print(
+        "[v4.6-assert] baseline passed: "
+        f"click_points={click_points} verified={verified} max_frame_delta={max_frame_delta}"
+    )
 
 
 def run_selftest() -> None:
