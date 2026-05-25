@@ -168,6 +168,8 @@ def main() -> None:
 
     count = project(audit_path, db_path)
     print(f"[audit-sqlite] projected {count} records into {db_path}")
+    if args.telemetry_report:
+        print_telemetry_report(db_path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -185,6 +187,11 @@ def parse_args() -> argparse.Namespace:
         "--selftest",
         action="store_true",
         help="run a small in-memory projection test",
+    )
+    parser.add_argument(
+        "--telemetry-report",
+        action="store_true",
+        help="print a live-fire telemetry report after projection",
     )
     return parser.parse_args()
 
@@ -520,6 +527,149 @@ def stringify_optional(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def print_telemetry_report(db_path: Path) -> None:
+    report = build_telemetry_report(db_path)
+    print("[telemetry] Genesis live-fire report")
+    print(
+        "[telemetry] intents total={total} decoded={decoded} decoder_failures={failures} "
+        "json_legal_rate_pct={legal:.2f} fallback_actions={fallback} fallback_rate_pct={fallback_rate:.2f}".format(
+            total=report["intent_total"],
+            decoded=report["decoded_actions"],
+            failures=report["brain_decoder_failures"],
+            legal=report["json_legal_rate_pct"],
+            fallback=report["fallback_actions"],
+            fallback_rate=report["fallback_rate_pct"],
+        )
+    )
+    print_mapping("[telemetry] action_distribution", report["action_distribution"])
+    print_mapping("[telemetry] failure_distribution", report["failure_distribution"])
+    print_mapping("[telemetry] warning_distribution", report["warning_distribution"])
+    print(
+        "[telemetry] stale_but_hit lucky_hits={count} avg_frame_delta={avg:.2f}".format(
+            count=report["stale_but_hit"]["count"],
+            avg=report["stale_but_hit"]["avg_frame_delta"],
+        )
+    )
+    print(
+        "[telemetry] advisory count={count} avg_sample_count={avg:.2f}".format(
+            count=report["advisory"]["count"],
+            avg=report["advisory"]["avg_sample_count"],
+        )
+    )
+    print("[telemetry-json] " + json.dumps(report, ensure_ascii=False, sort_keys=True))
+
+
+def build_telemetry_report(db_path: Path) -> dict[str, Any]:
+    conn = sqlite3.connect(db_path)
+    try:
+        decoded_actions = scalar(conn, "SELECT COUNT(*) FROM actions WHERE decoded_tick_id IS NOT NULL")
+        brain_decoder_failures = scalar(
+            conn,
+            """
+            SELECT COUNT(*)
+            FROM failures
+            WHERE component = 'BrainActionDecoder'
+            """,
+        )
+        fallback_actions = scalar(
+            conn,
+            """
+            SELECT COUNT(*)
+            FROM actions
+            WHERE reason LIKE 'fallback after invalid model output:%'
+            """,
+        )
+        intent_total = decoded_actions + brain_decoder_failures
+        action_distribution = query_counts(
+            conn,
+            """
+            SELECT COALESCE(act, 'unknown'), COUNT(*)
+            FROM actions
+            WHERE decoded_tick_id IS NOT NULL
+            GROUP BY act
+            ORDER BY COUNT(*) DESC, act
+            """,
+        )
+        failure_distribution = query_counts(
+            conn,
+            """
+            SELECT COALESCE(failure_kind, 'Unknown'), COUNT(*)
+            FROM outcomes
+            WHERE status = 'Failed'
+            GROUP BY failure_kind
+            ORDER BY COUNT(*) DESC, failure_kind
+            """,
+        )
+        warning_distribution = query_counts(
+            conn,
+            """
+            SELECT COALESCE(warning_kind, 'Unknown'), COUNT(*)
+            FROM outcomes
+            WHERE warning_kind IS NOT NULL
+            GROUP BY warning_kind
+            ORDER BY COUNT(*) DESC, warning_kind
+            """,
+        )
+        stale = conn.execute(
+            """
+            SELECT COUNT(*), COALESCE(AVG(json_extract(evidence_json, '$.frame_delta')), 0)
+            FROM outcomes
+            WHERE status = 'Verified' AND warning_kind = 'StaleButHit'
+            """
+        ).fetchone()
+        advisory = conn.execute(
+            """
+            SELECT COUNT(*), COALESCE(AVG(sample_count), 0)
+            FROM memory_advisories
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    return {
+        "intent_total": int(intent_total),
+        "decoded_actions": int(decoded_actions),
+        "brain_decoder_failures": int(brain_decoder_failures),
+        "json_legal_rate_pct": percent(decoded_actions, intent_total),
+        "fallback_actions": int(fallback_actions),
+        "fallback_rate_pct": percent(fallback_actions, max(decoded_actions, 1)),
+        "action_distribution": action_distribution,
+        "failure_distribution": failure_distribution,
+        "warning_distribution": warning_distribution,
+        "stale_but_hit": {
+            "count": int(stale[0] or 0),
+            "avg_frame_delta": float(stale[1] or 0),
+        },
+        "advisory": {
+            "count": int(advisory[0] or 0),
+            "avg_sample_count": float(advisory[1] or 0),
+        },
+    }
+
+
+def scalar(conn: sqlite3.Connection, sql: str) -> int:
+    row = conn.execute(sql).fetchone()
+    return int(row[0] or 0)
+
+
+def query_counts(conn: sqlite3.Connection, sql: str) -> dict[str, int]:
+    return {str(key): int(count) for key, count in conn.execute(sql).fetchall()}
+
+
+def percent(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 100.0
+    return round(numerator * 100.0 / denominator, 2)
+
+
+def print_mapping(label: str, values: dict[str, int]) -> None:
+    if not values:
+        print(f"{label} <none>")
+        return
+    rendered = ", ".join(f"{key}={value}" for key, value in values.items())
+    print(f"{label} {rendered}")
 
 
 def run_selftest() -> None:
