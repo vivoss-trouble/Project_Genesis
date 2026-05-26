@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Genesis v8.1 Shadow Mapping Sample</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f8fafc;
+      color: #334155;
+    }
+
+    body {
+      margin: 0;
+      padding: 48px 64px;
+    }
+
+    main {
+      max-width: 980px;
+      margin: 0 auto;
+      background: #ffffff;
+      border: 1px solid #dbe3ef;
+      box-shadow: 0 12px 34px rgba(15, 23, 42, 0.12);
+      padding: 42px 48px 56px;
+    }
+
+    h1 {
+      margin: 0 0 18px;
+      color: #7c3aed;
+      font-size: 46px;
+      line-height: 1.04;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      margin: 0 0 24px;
+      color: #64748b;
+      font-size: 18px;
+      line-height: 1.65;
+    }
+
+    .nav-link {
+      display: inline-block;
+      color: #1d4ed8;
+      font-weight: 700;
+      font-size: 20px;
+      text-decoration: underline;
+      text-underline-offset: 4px;
+      margin: 0 0 32px;
+    }
+
+    .action-row {
+      display: flex;
+      gap: 18px;
+      align-items: center;
+      margin-bottom: 34px;
+    }
+
+    .button-like {
+      appearance: none;
+      border: 0;
+      background: #2563eb;
+      color: #ffffff;
+      font-size: 18px;
+      font-weight: 800;
+      padding: 18px 28px;
+      border-radius: 8px;
+      min-width: 210px;
+    }
+
+    .code-block {
+      background: #111827;
+      color: #d1fae5;
+      border-radius: 8px;
+      padding: 24px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 17px;
+      line-height: 1.55;
+      margin: 0 0 34px;
+      white-space: pre;
+    }
+
+    .scroll-region {
+      height: 270px;
+      overflow: auto;
+      background: #fde68a;
+      border: 4px solid #f59e0b;
+      border-radius: 8px;
+      padding: 22px;
+    }
+
+    .scroll-region h2 {
+      margin: 0 0 14px;
+      color: #78350f;
+      font-size: 24px;
+    }
+
+    .scroll-region p {
+      width: 760px;
+      color: #92400e;
+      line-height: 1.6;
+      margin: 0 0 18px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Open Web Shadow Map</h1>
+    <p class="lead">
+      This page mimics a static documentation surface with headings, links,
+      buttons, code, and a scrollable region.
+    </p>
+    <a class="nav-link" href="#shadow-target">Read the mapping contract</a>
+    <div class="action-row">
+      <button class="button-like" type="button">Shadow Action</button>
+    </div>
+    <pre class="code-block">fn shadow_map() {
+    assert!(posted == false);
+    assert!(os_driver_active == false);
+}</pre>
+    <section class="scroll-region" id="shadow-target" aria-label="scrollable reference">
+      <h2>Scrollable Reference</h2>
+      <p>
+        A real web page is not a calculator grid. Genesis must first learn to
+        name the physical regions in a browser window without mutating the page.
+      </p>
+      <p>
+        This scroll container gives the mapper a spatial extension boundary
+        while keeping the redline deterministic and side-effect free.
+      </p>
+      <p>
+        The v8.1 contract is observation only: capture, classify, project, and
+        write telemetry. No click, no scroll, no keyboard input.
+      </p>
+    </section>
+  </main>
+</body>
+</html>
