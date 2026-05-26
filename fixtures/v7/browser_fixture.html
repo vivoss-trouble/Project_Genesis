@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Genesis v7.1 Browser Fixture</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      background: #111318;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 980px;
+      background: #111318;
+      color: #f4f7fb;
+    }
+
+    main {
+      width: 760px;
+      margin: 72px auto;
+      padding: 24px;
+      background: #181b22;
+      border: 1px solid #343946;
+    }
+
+    h1 {
+      margin: 0 0 18px;
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+      margin-bottom: 22px;
+    }
+
+    .control {
+      min-height: 84px;
+      border: 0;
+      border-radius: 0;
+      color: #071017;
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .button-primary {
+      background: #00d1ff;
+    }
+
+    .button-secondary {
+      background: #22c55e;
+    }
+
+    .input-like {
+      background: #f3f7fb;
+      color: #14171d;
+      border: 8px solid #22c55e;
+    }
+
+    .scroll-like {
+      height: 180px;
+      padding: 18px;
+      overflow: hidden;
+      background: #f59e0b;
+      color: #16110a;
+      font-weight: 800;
+    }
+
+    .async-target {
+      margin-top: 22px;
+      width: 220px;
+      height: 76px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #ff00ff;
+      color: #180018;
+      font-size: 18px;
+      font-weight: 900;
+      opacity: 0;
+    }
+
+    .async-target.visible {
+      opacity: 1;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Genesis v7.1 Browser Fixture</h1>
+    <section class="grid" aria-label="control topology">
+      <button class="control button-primary" data-genesis-id="browser-button-a">BUTTON A</button>
+      <div class="control input-like" data-genesis-id="browser-input-a">INPUT FIELD</div>
+      <button class="control button-secondary" data-genesis-id="browser-button-b">BUTTON B</button>
+    </section>
+    <section class="scroll-like" data-genesis-id="browser-scroll-a">
+      SCROLL CONTAINER
+    </section>
+    <section id="async-target" class="async-target" data-genesis-id="browser-async-a">
+      ASYNC TARGET
+    </section>
+  </main>
+  <script>
+    window.setTimeout(() => {
+      document.getElementById("async-target").classList.add("visible");
+    }, 350);
+  </script>
+</body>
+</html>
