@@ -123,6 +123,9 @@ func pixelKind(r: UInt8, g: UInt8, b: UInt8, a: UInt8) -> String? {
     if red <= 90 && green >= 150 && blue >= 175 {
         return "button-like"
     }
+    if red >= 180 && green <= 100 && blue <= 140 {
+        return "fired-button"
+    }
     if red <= 120 && green >= 145 && blue <= 150 {
         return "button-like"
     }

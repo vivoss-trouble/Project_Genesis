@@ -72,6 +72,11 @@
       background: #00d1ff;
     }
 
+    .button-primary.activated {
+      background: #ff2d55;
+      color: #fff7fb;
+    }
+
     .button-secondary {
       background: #22c55e;
     }
@@ -114,7 +119,7 @@
   <main>
     <h1>Genesis v7.1 Browser Fixture</h1>
     <section class="grid" aria-label="control topology">
-      <button class="control button-primary" data-genesis-id="browser-button-a">BUTTON A</button>
+      <button id="button-a" class="control button-primary" data-genesis-id="browser-button-a">BUTTON A</button>
       <div class="control input-like" data-genesis-id="browser-input-a">INPUT FIELD</div>
       <button class="control button-secondary" data-genesis-id="browser-button-b">BUTTON B</button>
     </section>
@@ -129,6 +134,12 @@
     window.setTimeout(() => {
       document.getElementById("async-target").classList.add("visible");
     }, 350);
+
+    document.getElementById("button-a").addEventListener("click", () => {
+      document.getElementById("button-a").classList.add("activated");
+      document.getElementById("button-a").textContent = "FIRED";
+      document.body.setAttribute("data-genesis-fired", "button-a");
+    });
   </script>
 </body>
 </html>
