@@ -11,6 +11,7 @@ DUMMY_LOG="${GENESIS_V55_DUMMY_LOG:-/tmp/genesis_native_dummy_window_v55.log}"
 VISION_LOG="${GENESIS_V55_VISION_LOG:-/tmp/genesis_vision_daemon_v55.log}"
 DRIVER_LOG="${GENESIS_V55_DRIVER_LOG:-/tmp/genesis_os_driver_v55.log}"
 ARMED_TOKEN="GENESIS_V55_ARMED_VISION_MARKER"
+AUTO_FIRE_TOKEN="GENESIS_V55_AUTO_FIRE_NATIVE_DUMMY"
 FIRE_TOKEN="FIRE"
 VISIBLE_TOKEN="VISIBLE"
 VISION_HZ="${GENESIS_V55_VISION_HZ:-10}"
@@ -86,7 +87,9 @@ if [[ -z "$READY_JSON" ]]; then
     exit 1
 fi
 
-if [[ "${GENESIS_V55_VISIBLE_CONFIRM:-}" != "$VISIBLE_TOKEN" ]]; then
+if [[ "${GENESIS_V55_AUTO_VISIBLE:-}" == "1" ]]; then
+    echo "[v5.5] GENESIS_V55_AUTO_VISIBLE=1; starting vision capture without VISIBLE prompt."
+elif [[ "${GENESIS_V55_VISIBLE_CONFIRM:-}" != "$VISIBLE_TOKEN" ]]; then
     echo "[v5.5] Move/uncover the Native Dummy so the magenta marker is visible."
     echo "[v5.5] Type VISIBLE and press Enter to start vision capture."
     read -r VISIBLE_INPUT
@@ -131,7 +134,9 @@ fi
 DRIVER_PID=$!
 wait_for_socket "$OS_SOCKET"
 
-if [[ "$ARMED" == true && "${GENESIS_V55_FIRE_CONFIRM:-}" != "$FIRE_TOKEN" ]]; then
+if [[ "$ARMED" == true && "${GENESIS_V55_AUTO_FIRE_CONFIRM:-}" == "$AUTO_FIRE_TOKEN" ]]; then
+    echo "[v5.5] Auto-fire confirmation accepted for controlled Native Dummy."
+elif [[ "$ARMED" == true && "${GENESIS_V55_FIRE_CONFIRM:-}" != "$FIRE_TOKEN" ]]; then
     echo "[v5.5] Native dummy is open. Type FIRE and press Enter to post the vision-guided click."
     read -r FIRE_INPUT
     if [[ "$FIRE_INPUT" != "$FIRE_TOKEN" ]]; then
