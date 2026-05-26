@@ -12,6 +12,7 @@ ARMED_TOKEN="GENESIS_V53_ARMED_NATIVE_DUMMY"
 FIRE_TOKEN="FIRE"
 COORDINATE_DOMAIN="${GENESIS_V53_COORDINATE_DOMAIN:-appkit}"
 POST_CLICK_SETTLE_SEC="${GENESIS_V53_POST_CLICK_SETTLE_SEC:-0.5}"
+PRE_CLICK_SETTLE_SEC="${GENESIS_V53_PRE_CLICK_SETTLE_SEC:-0.3}"
 DRIVER_PID=""
 DUMMY_PID=""
 
@@ -112,6 +113,7 @@ import json
 import os
 import socket
 import sys
+import time
 
 socket_path = sys.argv[1]
 target = json.loads(sys.argv[2])
@@ -148,6 +150,21 @@ if armed and not probe.get("probe", {}).get("accessibility_trusted"):
         "[v5.3] Accessibility is not trusted; refusing armed click. "
         "Grant Accessibility to the terminal/Codex host, then rerun."
     )
+
+move = roundtrip(
+    {
+        "request_id": "move-v53-native-dummy",
+        "action_id": "act-v53-native-dummy-move",
+        "act": "move_mouse",
+        "x": center["x"],
+        "y": center["y"],
+    }
+)
+print(json.dumps({"event": "os_driver_move", "move": move}, sort_keys=True))
+assert move["status"] == "ok", move
+assert move["receipt"]["point"] == {"x": center["x"], "y": center["y"]}, move
+assert move["receipt"]["posted"] is armed, move
+time.sleep(float(os.environ.get("GENESIS_V53_PRE_CLICK_SETTLE_SEC", "0.3")))
 
 click = roundtrip(
     {

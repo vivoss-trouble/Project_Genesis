@@ -115,6 +115,7 @@ func runtimeTargetPayload(config: Config, event: String, window: NSWindow, view:
 final class DummyView: NSView {
     let config: Config
     var hitCount = 0
+    var trackingArea: NSTrackingArea?
 
     init(config: Config) {
         self.config = config
@@ -130,6 +131,22 @@ final class DummyView: NSView {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
+    }
+
+    override func updateTrackingAreas() {
+        if let trackingArea {
+            removeTrackingArea(trackingArea)
+        }
+        let options: NSTrackingArea.Options = [
+            .mouseEnteredAndExited,
+            .mouseMoved,
+            .activeAlways,
+            .inVisibleRect,
+        ]
+        let area = NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil)
+        addTrackingArea(area)
+        trackingArea = area
+        super.updateTrackingAreas()
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -185,6 +202,24 @@ final class DummyView: NSView {
         }
     }
 
+    override func mouseMoved(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        jsonLine([
+            "event": "native_dummy_mouse_moved",
+            "inside_target": targetRect().contains(point),
+            "local_point": ["x": point.x, "y": point.y],
+        ])
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        jsonLine([
+            "event": "native_dummy_mouse_entered",
+            "inside_target": targetRect().contains(point),
+            "local_point": ["x": point.x, "y": point.y],
+        ])
+    }
+
     func targetRect() -> NSRect {
         NSRect(
             x: config.targetX,
@@ -218,9 +253,13 @@ let window = NSWindow(
 )
 window.title = "Genesis Native Dummy"
 window.isReleasedWhenClosed = false
+window.level = .floating
+window.acceptsMouseMovedEvents = true
 let dummyView = DummyView(config: config)
 window.contentView = dummyView
 window.makeKeyAndOrderFront(nil)
+window.makeMain()
+window.makeFirstResponder(dummyView)
 NSApp.activate(ignoringOtherApps: true)
 
 jsonLine(runtimeTargetPayload(config: config, event: "ready", window: window, view: dummyView))
