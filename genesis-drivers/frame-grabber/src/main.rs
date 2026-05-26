@@ -108,6 +108,35 @@ struct LogicalBounds {
     height: f64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+struct LogicalPoint {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MarkerDetection {
+    marker_id: &'static str,
+    pixel_center: PixelPoint,
+    coregraphics_logical_center: LogicalPoint,
+    appkit_logical_center: LogicalPoint,
+    pixel_count: usize,
+    threshold: MarkerThreshold,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct PixelPoint {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct MarkerThreshold {
+    min_green: u8,
+    max_red: u8,
+    max_blue: u8,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct FrameState {
     frame_id: u64,
@@ -126,6 +155,7 @@ struct FrameState {
     bytes_per_row: Option<usize>,
     bits_per_pixel: Option<usize>,
     capture_latency_ms: f64,
+    marker_detection: Option<MarkerDetection>,
     error: Option<String>,
 }
 
@@ -331,6 +361,7 @@ fn capture_frame_state(frame_id: u64) -> FrameState {
         bytes_per_row: None,
         bits_per_pixel: None,
         capture_latency_ms: 0.0,
+        marker_detection: None,
         error: Some("genesis-frame-grabber currently supports macOS only".to_string()),
     }
 }
@@ -378,12 +409,91 @@ fn current_ts() -> u64 {
         .as_millis() as u64
 }
 
+#[derive(Debug)]
+struct RawMarkerDetection {
+    pixel_center: PixelPoint,
+    pixel_count: usize,
+    threshold: MarkerThreshold,
+}
+
+fn detect_marker_from_bgra_like_buffer(
+    bytes: &[u8],
+    width: usize,
+    height: usize,
+    bytes_per_row: usize,
+) -> Option<RawMarkerDetection> {
+    const THRESHOLD: MarkerThreshold = MarkerThreshold {
+        min_green: 220,
+        max_red: 45,
+        max_blue: 45,
+    };
+
+    if width == 0 || height == 0 || bytes_per_row < width.saturating_mul(4) {
+        return None;
+    }
+
+    let mut count = 0usize;
+    let mut sum_x = 0f64;
+    let mut sum_y = 0f64;
+
+    for y in 0..height {
+        let row_start = y.saturating_mul(bytes_per_row);
+        let row_end = row_start.saturating_add(width.saturating_mul(4));
+        if row_end > bytes.len() {
+            break;
+        }
+        let row = &bytes[row_start..row_end];
+        for x in 0..width {
+            let offset = x * 4;
+            let pixel = &row[offset..offset + 4];
+            if is_marker_pixel(pixel, &THRESHOLD) {
+                count += 1;
+                sum_x += x as f64 + 0.5;
+                sum_y += y as f64 + 0.5;
+            }
+        }
+    }
+
+    if count == 0 {
+        return None;
+    }
+
+    Some(RawMarkerDetection {
+        pixel_center: PixelPoint {
+            x: sum_x / count as f64,
+            y: sum_y / count as f64,
+        },
+        pixel_count: count,
+        threshold: THRESHOLD,
+    })
+}
+
+fn is_marker_pixel(pixel: &[u8], threshold: &MarkerThreshold) -> bool {
+    let candidates = [
+        (pixel[0], pixel[1], pixel[2], pixel[3]), // RGBA
+        (pixel[2], pixel[1], pixel[0], pixel[3]), // BGRA
+        (pixel[1], pixel[2], pixel[3], pixel[0]), // ARGB
+        (pixel[3], pixel[2], pixel[1], pixel[0]), // ABGR
+    ];
+    candidates.iter().any(|(r, g, b, a)| {
+        *a >= 128
+            && *g >= threshold.min_green
+            && *r <= threshold.max_red
+            && *b <= threshold.max_blue
+    })
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{FrameState, Instant, LogicalBounds, PixelSize, current_ts};
+    use super::{
+        FrameState, Instant, LogicalBounds, LogicalPoint, MarkerDetection, PixelSize, current_ts,
+        detect_marker_from_bgra_like_buffer,
+    };
     use std::ffi::c_void;
 
     type CGImageRef = *mut c_void;
+    type CGDataProviderRef = *mut c_void;
+    type CFDataRef = *mut c_void;
 
     #[repr(C)]
     #[derive(Debug, Clone, Copy)]
@@ -409,12 +519,16 @@ mod macos {
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
         fn CFRelease(cf: *const c_void);
+        fn CFDataGetBytePtr(the_data: CFDataRef) -> *const u8;
+        fn CFDataGetLength(the_data: CFDataRef) -> isize;
         fn CGDisplayBounds(display: u32) -> CGRect;
         fn CGDisplayCreateImage(display: u32) -> CGImageRef;
+        fn CGDataProviderCopyData(provider: CGDataProviderRef) -> CFDataRef;
         fn CGDisplayPixelsHigh(display: u32) -> usize;
         fn CGDisplayPixelsWide(display: u32) -> usize;
         fn CGImageGetBitsPerPixel(image: CGImageRef) -> usize;
         fn CGImageGetBytesPerRow(image: CGImageRef) -> usize;
+        fn CGImageGetDataProvider(image: CGImageRef) -> CGDataProviderRef;
         fn CGImageGetHeight(image: CGImageRef) -> usize;
         fn CGImageGetWidth(image: CGImageRef) -> usize;
         fn CGMainDisplayID() -> u32;
@@ -465,6 +579,7 @@ mod macos {
                 bytes_per_row: None,
                 bits_per_pixel: None,
                 capture_latency_ms,
+                marker_detection: None,
                 error: Some(
                     "CGDisplayCreateImage returned null; Screen Recording permission may be required"
                         .to_string(),
@@ -476,6 +591,16 @@ mod macos {
         let height = unsafe { CGImageGetHeight(image) };
         let bytes_per_row = unsafe { CGImageGetBytesPerRow(image) };
         let bits_per_pixel = unsafe { CGImageGetBitsPerPixel(image) };
+        let marker_detection = detect_marker(
+            image,
+            width,
+            height,
+            bytes_per_row,
+            bits_per_pixel,
+            scale_x,
+            scale_y,
+            logical_height,
+        );
         unsafe {
             CFRelease(image.cast_const());
         }
@@ -500,6 +625,7 @@ mod macos {
             bytes_per_row: Some(bytes_per_row),
             bits_per_pixel: Some(bits_per_pixel),
             capture_latency_ms,
+            marker_detection,
             error: None,
         }
     }
@@ -510,5 +636,116 @@ mod macos {
         } else {
             None
         }
+    }
+
+    fn detect_marker(
+        image: CGImageRef,
+        width: usize,
+        height: usize,
+        bytes_per_row: usize,
+        bits_per_pixel: usize,
+        scale_x: Option<f64>,
+        scale_y: Option<f64>,
+        logical_height: f64,
+    ) -> Option<MarkerDetection> {
+        if bits_per_pixel != 32 {
+            return None;
+        }
+
+        let provider = unsafe { CGImageGetDataProvider(image) };
+        if provider.is_null() {
+            return None;
+        }
+        let data = unsafe { CGDataProviderCopyData(provider) };
+        if data.is_null() {
+            return None;
+        }
+
+        let bytes = unsafe {
+            let ptr = CFDataGetBytePtr(data);
+            let len = CFDataGetLength(data);
+            if ptr.is_null() || len <= 0 {
+                CFRelease(data.cast_const());
+                return None;
+            }
+            std::slice::from_raw_parts(ptr, len as usize)
+        };
+
+        let marker = detect_marker_from_bgra_like_buffer(bytes, width, height, bytes_per_row);
+        unsafe {
+            CFRelease(data.cast_const());
+        }
+
+        let marker = marker?;
+        let scale_x = scale_x?;
+        let scale_y = scale_y?;
+        if scale_x <= 0.0 || scale_y <= 0.0 {
+            return None;
+        }
+
+        let coregraphics_x = marker.pixel_center.x / scale_x;
+        let coregraphics_y = marker.pixel_center.y / scale_y;
+        Some(MarkerDetection {
+            marker_id: "native-heal-marker",
+            pixel_center: marker.pixel_center,
+            coregraphics_logical_center: LogicalPoint {
+                x: coregraphics_x,
+                y: coregraphics_y,
+            },
+            appkit_logical_center: LogicalPoint {
+                x: coregraphics_x,
+                y: logical_height - coregraphics_y,
+            },
+            pixel_count: marker.pixel_count,
+            threshold: marker.threshold,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detect_marker_from_bgra_like_buffer;
+
+    #[test]
+    fn marker_detector_finds_pure_green_bgra_cluster() {
+        let width = 16usize;
+        let height = 12usize;
+        let bytes_per_row = width * 4;
+        let mut bytes = vec![0u8; bytes_per_row * height];
+
+        for y in 4..8 {
+            for x in 6..10 {
+                let offset = y * bytes_per_row + x * 4;
+                bytes[offset] = 0; // B
+                bytes[offset + 1] = 255; // G
+                bytes[offset + 2] = 0; // R
+                bytes[offset + 3] = 255; // A
+            }
+        }
+
+        let marker = detect_marker_from_bgra_like_buffer(&bytes, width, height, bytes_per_row)
+            .expect("expected marker detection");
+        assert_eq!(marker.pixel_count, 16);
+        assert!((marker.pixel_center.x - 8.0).abs() < f64::EPSILON);
+        assert!((marker.pixel_center.y - 6.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn marker_detector_rejects_native_dummy_button_background() {
+        let width = 4usize;
+        let height = 4usize;
+        let bytes_per_row = width * 4;
+        let mut bytes = vec![0u8; bytes_per_row * height];
+
+        for chunk in bytes.chunks_exact_mut(4) {
+            chunk[0] = 89; // B from the non-marker green button fill
+            chunk[1] = 229; // G
+            chunk[2] = 38; // R
+            chunk[3] = 255; // A
+        }
+
+        assert!(
+            detect_marker_from_bgra_like_buffer(&bytes, width, height, bytes_per_row).is_none()
+        );
     }
 }

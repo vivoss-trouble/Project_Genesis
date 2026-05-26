@@ -11,6 +11,7 @@ struct Config {
     var targetY: Double = 95
     var targetWidth: Double = 120
     var targetHeight: Double = 70
+    var markerSize: Double = 12
 }
 
 func parseConfig() -> Config {
@@ -53,10 +54,14 @@ func targetPayload(config: Config, event: String) -> [String: Any] {
     let globalTargetY = config.windowY + config.targetY
     let centerX = globalTargetX + config.targetWidth / 2.0
     let centerY = globalTargetY + config.targetHeight / 2.0
+    let markerX = centerX
+    let markerY = centerY
     let screenHeight = NSScreen.main?.frame.height ?? 0.0
     return [
         "event": event,
         "target_id": "native-heal",
+        "marker_id": "native-heal-marker",
+        "marker_rgb": ["r": 0, "g": 255, "b": 0],
         "screen_logical_height": screenHeight,
         "window": [
             "x": config.windowX,
@@ -74,9 +79,17 @@ func targetPayload(config: Config, event: String) -> [String: Any] {
             "x": centerX,
             "y": centerY,
         ],
+        "marker_global_logical_center": [
+            "x": markerX,
+            "y": markerY,
+        ],
         "target_quartz_logical_center": [
             "x": centerX,
             "y": screenHeight > 0.0 ? screenHeight - centerY : centerY,
+        ],
+        "marker_quartz_logical_center": [
+            "x": markerX,
+            "y": screenHeight > 0.0 ? screenHeight - markerY : markerY,
         ],
     ]
 }
@@ -85,8 +98,12 @@ func runtimeTargetPayload(config: Config, event: String, window: NSWindow, view:
     var payload = targetPayload(config: config, event: event)
     let targetWindowRect = view.convert(view.targetRect(), to: nil)
     let targetScreenRect = window.convertToScreen(targetWindowRect)
+    let markerWindowRect = view.convert(view.markerRect(), to: nil)
+    let markerScreenRect = window.convertToScreen(markerWindowRect)
     let centerX = targetScreenRect.midX
     let centerY = targetScreenRect.midY
+    let markerCenterX = markerScreenRect.midX
+    let markerCenterY = markerScreenRect.midY
     let screenHeight = NSScreen.main?.frame.height ?? 0.0
 
     payload["window_frame"] = [
@@ -105,9 +122,23 @@ func runtimeTargetPayload(config: Config, event: String, window: NSWindow, view:
         "x": centerX,
         "y": centerY,
     ]
+    payload["marker_appkit_screen_rect"] = [
+        "x": markerScreenRect.origin.x,
+        "y": markerScreenRect.origin.y,
+        "width": markerScreenRect.size.width,
+        "height": markerScreenRect.size.height,
+    ]
+    payload["marker_appkit_screen_center"] = [
+        "x": markerCenterX,
+        "y": markerCenterY,
+    ]
     payload["target_coregraphics_screen_center"] = [
         "x": centerX,
         "y": screenHeight > 0.0 ? screenHeight - centerY : centerY,
+    ]
+    payload["marker_coregraphics_screen_center"] = [
+        "x": markerCenterX,
+        "y": screenHeight > 0.0 ? screenHeight - markerCenterY : markerCenterY,
     ]
     return payload
 }
@@ -173,6 +204,12 @@ final class DummyView: NSView {
         let label = hitCount == 0 ? "NATIVE HEAL" : "HIT \(hitCount)"
         label.draw(in: target.insetBy(dx: 4, dy: 24), withAttributes: attrs)
 
+        let marker = markerRect()
+        NSColor.black.setFill()
+        marker.insetBy(dx: -2, dy: -2).fill()
+        NSColor(calibratedRed: 0.0, green: 1.0, blue: 0.0, alpha: 1.0).setFill()
+        marker.fill()
+
         let titleAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
             .foregroundColor: NSColor(calibratedWhite: 0.8, alpha: 1.0),
@@ -226,6 +263,16 @@ final class DummyView: NSView {
             y: config.targetY,
             width: config.targetWidth,
             height: config.targetHeight
+        )
+    }
+
+    func markerRect() -> NSRect {
+        let target = targetRect()
+        return NSRect(
+            x: target.midX - config.markerSize / 2.0,
+            y: target.midY - config.markerSize / 2.0,
+            width: config.markerSize,
+            height: config.markerSize
         )
     }
 }

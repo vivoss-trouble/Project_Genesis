@@ -30,13 +30,19 @@ window = payload["window"]
 target = payload["target_logical_rect"]
 center = payload["target_global_logical_center"]
 quartz_center = payload["target_quartz_logical_center"]
+marker_center = payload["marker_global_logical_center"]
+marker_quartz_center = payload["marker_quartz_logical_center"]
 screen_height = payload["screen_logical_height"]
 
 assert window == {"height": 260, "width": 420, "x": 160, "y": 160}, payload
 assert target == {"height": 70, "width": 120, "x": 150, "y": 95}, payload
 assert center == {"x": 370, "y": 290}, payload
+assert payload["marker_id"] == "native-heal-marker", payload
+assert payload["marker_rgb"] == {"r": 0, "g": 255, "b": 0}, payload
+assert marker_center == center, payload
 assert screen_height > 0, payload
 assert quartz_center == {"x": 370, "y": screen_height - 290}, payload
+assert marker_quartz_center == quartz_center, payload
 print("[v5.2-native-dummy] deterministic target geometry passed")
 PY
 

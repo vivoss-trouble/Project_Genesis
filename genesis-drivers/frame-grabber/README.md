@@ -49,3 +49,17 @@ or Codex host process before expecting real pixel access.
 This probe and daemon do not perform object detection, OCR, target extraction, or
 action planning. Those belong after the frame sampling boundary is measured and
 stable.
+
+## v5.4 Native Marker Baseline
+
+The frame state may include a `marker_detection` object when the controlled
+Native Dummy marker is visible and Screen Recording permission is granted. This
+is a deterministic color-threshold detector for the `native-heal-marker` only:
+
+- threshold: `G >= 220`, `R <= 45`, `B <= 45`
+- output pixel center in physical capture coordinates
+- output CoreGraphics logical center for `genesis-os-driver`
+- output AppKit logical center for audit comparison
+
+If Screen Recording permission is missing or the marker is not visible,
+`marker_detection` is `null`. This is an observation fact, not an error.
