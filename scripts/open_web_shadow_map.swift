@@ -389,6 +389,93 @@ func drawDebugOverlay(image: CGImage, components: [RawComponent], path: String) 
     try png.write(to: URL(fileURLWithPath: path))
 }
 
+func numericValue(_ payload: [String: Any], _ key: String) -> Double {
+    if let value = payload[key] as? Double {
+        return value
+    }
+    if let value = payload[key] as? CGFloat {
+        return Double(value)
+    }
+    if let value = payload[key] as? NSNumber {
+        return value.doubleValue
+    }
+    return 0.0
+}
+
+func rectFromTarget(_ target: [String: Any]) -> CGRect {
+    guard let bbox = target["bbox"] as? [String: Any] else {
+        return .zero
+    }
+    return CGRect(
+        x: numericValue(bbox, "x"),
+        y: numericValue(bbox, "y"),
+        width: numericValue(bbox, "width"),
+        height: numericValue(bbox, "height")
+    )
+}
+
+func centerFromTarget(_ target: [String: Any]) -> CGPoint {
+    guard let point = target["pixel_center"] as? [String: Any] else {
+        return .zero
+    }
+    return CGPoint(
+        x: numericValue(point, "x"),
+        y: numericValue(point, "y")
+    )
+}
+
+func attachScrollTopology(to targets: [[String: Any]]) -> (targets: [[String: Any]], scrollRegions: [[String: Any]]) {
+    let scrollTargets = targets.filter { ($0["control_kind"] as? String) == "scroll-region" }
+    guard !scrollTargets.isEmpty else {
+        return (targets, [])
+    }
+
+    var enrichedTargets = targets
+    var containerByTargetId: [String: String] = [:]
+    var scrollRegions: [[String: Any]] = []
+
+    for scrollTarget in scrollTargets {
+        guard let scrollId = scrollTarget["target_id"] as? String else { continue }
+        let scrollRect = rectFromTarget(scrollTarget)
+        let childIds = targets.compactMap { target -> String? in
+            guard
+                let targetId = target["target_id"] as? String,
+                targetId != scrollId,
+                (target["control_kind"] as? String) != "scroll-region"
+            else {
+                return nil
+            }
+            let center = centerFromTarget(target)
+            guard scrollRect.contains(center) else { return nil }
+            return targetId
+        }
+
+        for childId in childIds {
+            containerByTargetId[childId] = scrollId
+        }
+
+        var region = scrollTarget
+        region["child_target_ids"] = childIds.sorted()
+        region["child_count"] = childIds.count
+        scrollRegions.append(region)
+    }
+
+    for index in enrichedTargets.indices {
+        guard let targetId = enrichedTargets[index]["target_id"] as? String else { continue }
+        if let containerId = containerByTargetId[targetId] {
+            enrichedTargets[index]["container_id"] = containerId
+        }
+    }
+
+    return (enrichedTargets, scrollRegions)
+}
+
+func spatialTargetId(kind: String, component: RawComponent) -> String {
+    let bucketX = Int((component.pixelCenter.x / 16.0).rounded())
+    let bucketY = Int((component.pixelCenter.y / 16.0).rounded())
+    return "shadow-\(kind)-x\(bucketX)-y\(bucketY)"
+}
+
 do {
     let startedAt = Date()
     let window = try findBrowserWindow()
@@ -407,14 +494,20 @@ do {
     let scaleX = window.bounds.width > 0 ? Double(buffer.width) / window.bounds.width : 1.0
     let scaleY = window.bounds.height > 0 ? Double(buffer.height) / window.bounds.height : 1.0
     var kindCounters: [String: Int] = [:]
+    var emittedTargetIds = Set<String>()
     var targets: [[String: Any]] = []
     for component in components {
         let localX = component.pixelCenter.x / scaleX
         let localY = component.pixelCenter.y / scaleY
         let kindIndex = kindCounters[component.kind, default: 0]
         kindCounters[component.kind] = kindIndex + 1
+        var targetId = spatialTargetId(kind: component.kind, component: component)
+        if emittedTargetIds.contains(targetId) {
+            targetId = "\(targetId)-n\(kindIndex)"
+        }
+        emittedTargetIds.insert(targetId)
         targets.append([
-            "target_id": "shadow-\(component.kind)-\(kindIndex)",
+            "target_id": targetId,
             "control_kind": component.kind,
             "bbox": [
                 "x": component.bbox.origin.x,
@@ -438,6 +531,8 @@ do {
             "confidence": component.confidence,
         ])
     }
+    let topology = attachScrollTopology(to: targets)
+    targets = topology.targets
 
     try emit([
         "event": "open_web_shadow_map",
@@ -461,8 +556,9 @@ do {
         "target_count": targets.count,
         "control_kinds": Array(Set(targets.compactMap { $0["control_kind"] as? String })).sorted(),
         "targets": targets,
+        "scroll_regions": topology.scrollRegions,
         "debug_overlay": debugPath,
-        "taxonomy_version": "v8.1-shadow-taxonomy",
+        "taxonomy_version": "v8.5-shadow-taxonomy",
         "posted": false,
         "os_driver_active": false,
     ])

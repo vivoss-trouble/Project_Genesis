@@ -93,7 +93,7 @@
 
     .scroll-region h2 {
       margin: 0 0 14px;
-      color: #78350f;
+      color: #0f172a;
       font-size: 24px;
     }
 
@@ -102,6 +102,16 @@
       color: #92400e;
       line-height: 1.6;
       margin: 0 0 18px;
+    }
+
+    .nested-link {
+      display: inline-block;
+      color: #1d4ed8;
+      font-weight: 800;
+      font-size: 18px;
+      margin: 0 0 18px;
+      text-decoration: underline;
+      text-underline-offset: 4px;
     }
   </style>
 </head>
@@ -130,6 +140,7 @@
         This scroll container gives the mapper a spatial extension boundary
         while keeping the redline deterministic and side-effect free.
       </p>
+      <a class="nested-link" href="#nested-contract">Nested scroll contract</a>
       <p>
         The v8.1 contract is observation only: capture, classify, project, and
         write telemetry. No click, no scroll, no keyboard input.

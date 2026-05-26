@@ -89,9 +89,11 @@ def target_by_id(frame):
     return {target["target_id"]: target for target in frame.get("targets") or []}
 
 baseline = target_by_id(frames[0])
-all_ids = sorted(set().union(*(target_by_id(frame).keys() for frame in frames)))
+baseline_ids = sorted(baseline.keys())
+observed_ids = sorted(set().union(*(target_by_id(frame).keys() for frame in frames)))
+new_target_observations = sum(1 for target_id in observed_ids if target_id not in baseline)
 target_stats = []
-for target_id in all_ids:
+for target_id in baseline_ids:
     observations = []
     kinds = []
     for frame_index, frame in enumerate(frames):
@@ -144,8 +146,10 @@ capture_latencies = [float(frame.get("capture_latency_ms") or 0.0) for frame in 
 summary = {
     "event": "open_web_drift_telemetry",
     "frame_count": len(frames),
-    "target_ids": all_ids,
+    "target_ids": baseline_ids,
+    "observed_target_ids": observed_ids,
     "target_count_baseline": len(baseline),
+    "new_target_observations": new_target_observations,
     "target_stats": target_stats,
     "max_centroid_drift_px": max_drift,
     "max_window_origin_drift_px": max(window_origin_drifts) if window_origin_drifts else 0.0,

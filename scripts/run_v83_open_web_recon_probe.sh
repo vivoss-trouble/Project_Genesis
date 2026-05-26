@@ -73,6 +73,7 @@ max_content_drift = float(summary.get("max_centroid_drift_px") or 0.0)
 max_window_drift = float(summary.get("max_window_origin_drift_px") or 0.0)
 kind_switches = int(summary.get("max_kind_switch_count") or 0)
 missing = int(summary.get("missing_observations") or 0)
+new_observations = int(summary.get("new_target_observations") or 0)
 mean_latency = float(summary.get("mean_capture_latency_ms") or 0.0)
 
 threats = []
@@ -103,6 +104,7 @@ report = {
         "stability": {
             "kind_switch_count": kind_switches,
             "missing_observations": missing,
+            "new_target_observations": new_observations,
             "mean_capture_latency_ms": mean_latency,
             "max_capture_latency_ms": summary.get("max_capture_latency_ms"),
         },
