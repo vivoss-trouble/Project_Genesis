@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
@@ -120,8 +121,28 @@ struct MarkerDetection {
     pixel_center: PixelPoint,
     coregraphics_logical_center: LogicalPoint,
     appkit_logical_center: LogicalPoint,
+    bbox: PixelBoundingBox,
     pixel_count: usize,
     threshold: MarkerThreshold,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MarkerCandidate {
+    candidate_id: String,
+    pixel_center: PixelPoint,
+    coregraphics_logical_center: LogicalPoint,
+    appkit_logical_center: LogicalPoint,
+    bbox: PixelBoundingBox,
+    pixel_count: usize,
+    threshold: MarkerThreshold,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct PixelBoundingBox {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -176,6 +197,7 @@ struct FrameState {
     bits_per_pixel: Option<usize>,
     capture_latency_ms: f64,
     marker_detection: Option<MarkerDetection>,
+    marker_candidates: Vec<MarkerCandidate>,
     marker_sample: Option<MarkerSample>,
     error: Option<String>,
 }
@@ -389,6 +411,7 @@ fn capture_frame_state(frame_id: u64) -> FrameState {
         bits_per_pixel: None,
         capture_latency_ms: 0.0,
         marker_detection: None,
+        marker_candidates: Vec::new(),
         marker_sample: None,
         error: Some("genesis-frame-grabber currently supports macOS only".to_string()),
     }
@@ -437,19 +460,47 @@ fn current_ts() -> u64 {
         .as_millis() as u64
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 struct RawMarkerDetection {
     pixel_center: PixelPoint,
+    bbox: PixelBoundingBox,
     pixel_count: usize,
     threshold: MarkerThreshold,
 }
 
+#[derive(Debug)]
+struct RawMarkerCandidate {
+    pixel_center: PixelPoint,
+    bbox: PixelBoundingBox,
+    pixel_count: usize,
+    threshold: MarkerThreshold,
+}
+
+#[cfg(test)]
 fn detect_marker_from_bgra_like_buffer(
     bytes: &[u8],
     width: usize,
     height: usize,
     bytes_per_row: usize,
 ) -> Option<RawMarkerDetection> {
+    detect_marker_candidates_from_bgra_like_buffer(bytes, width, height, bytes_per_row)
+        .into_iter()
+        .next()
+        .map(|candidate| RawMarkerDetection {
+            pixel_center: candidate.pixel_center,
+            bbox: candidate.bbox,
+            pixel_count: candidate.pixel_count,
+            threshold: candidate.threshold,
+        })
+}
+
+fn detect_marker_candidates_from_bgra_like_buffer(
+    bytes: &[u8],
+    width: usize,
+    height: usize,
+    bytes_per_row: usize,
+) -> Vec<RawMarkerCandidate> {
     const THRESHOLD: MarkerThreshold = MarkerThreshold {
         min_red: 200,
         max_green: 120,
@@ -457,12 +508,10 @@ fn detect_marker_from_bgra_like_buffer(
     };
 
     if width == 0 || height == 0 || bytes_per_row < width.saturating_mul(4) {
-        return None;
+        return Vec::new();
     }
 
-    let mut count = 0usize;
-    let mut sum_x = 0f64;
-    let mut sum_y = 0f64;
+    let mut marker_mask = vec![false; width.saturating_mul(height)];
 
     for y in 0..height {
         let row_start = y.saturating_mul(bytes_per_row);
@@ -475,25 +524,86 @@ fn detect_marker_from_bgra_like_buffer(
             let offset = x * 4;
             let pixel = &row[offset..offset + 4];
             if is_marker_pixel(pixel, &THRESHOLD) {
-                count += 1;
-                sum_x += x as f64 + 0.5;
-                sum_y += y as f64 + 0.5;
+                marker_mask[y * width + x] = true;
             }
         }
     }
 
-    if count == 0 {
-        return None;
+    let mut visited = vec![false; marker_mask.len()];
+    let mut candidates = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            if !marker_mask[index] || visited[index] {
+                continue;
+            }
+
+            let mut queue = VecDeque::new();
+            queue.push_back((x, y));
+            visited[index] = true;
+
+            let mut count = 0usize;
+            let mut sum_x = 0f64;
+            let mut sum_y = 0f64;
+            let mut min_x = x;
+            let mut max_x = x;
+            let mut min_y = y;
+            let mut max_y = y;
+
+            while let Some((cx, cy)) = queue.pop_front() {
+                count += 1;
+                sum_x += cx as f64 + 0.5;
+                sum_y += cy as f64 + 0.5;
+                min_x = min_x.min(cx);
+                max_x = max_x.max(cx);
+                min_y = min_y.min(cy);
+                max_y = max_y.max(cy);
+
+                let neighbors = [
+                    (cx.wrapping_sub(1), cy, cx > 0),
+                    (cx + 1, cy, cx + 1 < width),
+                    (cx, cy.wrapping_sub(1), cy > 0),
+                    (cx, cy + 1, cy + 1 < height),
+                ];
+                for (nx, ny, in_bounds) in neighbors {
+                    if !in_bounds {
+                        continue;
+                    }
+                    let neighbor_index = ny * width + nx;
+                    if marker_mask[neighbor_index] && !visited[neighbor_index] {
+                        visited[neighbor_index] = true;
+                        queue.push_back((nx, ny));
+                    }
+                }
+            }
+
+            if count >= 8 {
+                candidates.push(RawMarkerCandidate {
+                    pixel_center: PixelPoint {
+                        x: sum_x / count as f64,
+                        y: sum_y / count as f64,
+                    },
+                    bbox: PixelBoundingBox {
+                        x: min_x,
+                        y: min_y,
+                        width: max_x - min_x + 1,
+                        height: max_y - min_y + 1,
+                    },
+                    pixel_count: count,
+                    threshold: THRESHOLD,
+                });
+            }
+        }
     }
 
-    Some(RawMarkerDetection {
-        pixel_center: PixelPoint {
-            x: sum_x / count as f64,
-            y: sum_y / count as f64,
-        },
-        pixel_count: count,
-        threshold: THRESHOLD,
-    })
+    candidates.sort_by(|a, b| {
+        a.bbox
+            .x
+            .cmp(&b.bbox.x)
+            .then(a.bbox.y.cmp(&b.bbox.y))
+            .then(b.pixel_count.cmp(&a.pixel_count))
+    });
+    candidates
 }
 
 fn is_marker_pixel(pixel: &[u8], threshold: &MarkerThreshold) -> bool {
@@ -580,9 +690,9 @@ fn expected_marker_sample_point() -> Option<LogicalPoint> {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{
-        FrameState, Instant, LogicalBounds, LogicalPoint, MarkerDetection, MarkerSample, PixelSize,
-        current_ts, detect_marker_from_bgra_like_buffer, expected_marker_sample_point,
-        sample_pixel_from_bgra_like_buffer,
+        FrameState, Instant, LogicalBounds, LogicalPoint, MarkerCandidate, MarkerDetection,
+        MarkerSample, PixelSize, current_ts, detect_marker_candidates_from_bgra_like_buffer,
+        expected_marker_sample_point, sample_pixel_from_bgra_like_buffer,
     };
     use std::ffi::c_void;
 
@@ -694,6 +804,7 @@ mod macos {
                 bits_per_pixel: None,
                 capture_latency_ms,
                 marker_detection: None,
+                marker_candidates: Vec::new(),
                 marker_sample: None,
                 error: Some(match window_id {
                     Some(window_id) => format!(
@@ -727,7 +838,7 @@ mod macos {
         };
         let capture_logical_width = width as f64 / capture_scale_x.unwrap_or(1.0);
         let capture_logical_height = height as f64 / capture_scale_y.unwrap_or(1.0);
-        let (marker_detection, marker_sample) = analyze_marker(
+        let (marker_detection, marker_candidates, marker_sample) = analyze_marker(
             image,
             width,
             height,
@@ -764,6 +875,7 @@ mod macos {
             bits_per_pixel: Some(bits_per_pixel),
             capture_latency_ms,
             marker_detection,
+            marker_candidates,
             marker_sample,
             error: None,
         }
@@ -813,18 +925,22 @@ mod macos {
         scale_x: Option<f64>,
         scale_y: Option<f64>,
         logical_height: f64,
-    ) -> (Option<MarkerDetection>, Option<MarkerSample>) {
+    ) -> (
+        Option<MarkerDetection>,
+        Vec<MarkerCandidate>,
+        Option<MarkerSample>,
+    ) {
         if bits_per_pixel != 32 {
-            return (None, None);
+            return (None, Vec::new(), None);
         }
 
         let provider = unsafe { CGImageGetDataProvider(image) };
         if provider.is_null() {
-            return (None, None);
+            return (None, Vec::new(), None);
         }
         let data = unsafe { CGDataProviderCopyData(provider) };
         if data.is_null() {
-            return (None, None);
+            return (None, Vec::new(), None);
         }
 
         let bytes = unsafe {
@@ -832,12 +948,13 @@ mod macos {
             let len = CFDataGetLength(data);
             if ptr.is_null() || len <= 0 {
                 CFRelease(data.cast_const());
-                return (None, None);
+                return (None, Vec::new(), None);
             }
             std::slice::from_raw_parts(ptr, len as usize)
         };
 
-        let marker = detect_marker_from_bgra_like_buffer(bytes, width, height, bytes_per_row);
+        let raw_candidates =
+            detect_marker_candidates_from_bgra_like_buffer(bytes, width, height, bytes_per_row);
         let marker_sample = expected_marker_sample_point().and_then(|point| {
             let scale_x = scale_x?;
             let scale_y = scale_y?;
@@ -860,35 +977,48 @@ mod macos {
             CFRelease(data.cast_const());
         }
 
-        let Some(marker) = marker else {
-            return (None, marker_sample);
-        };
         let (Some(scale_x), Some(scale_y)) = (scale_x, scale_y) else {
-            return (None, marker_sample);
+            return (None, Vec::new(), marker_sample);
         };
         if scale_x <= 0.0 || scale_y <= 0.0 {
-            return (None, marker_sample);
+            return (None, Vec::new(), marker_sample);
         }
 
-        let coregraphics_x = marker.pixel_center.x / scale_x;
-        let coregraphics_y = marker.pixel_center.y / scale_y;
-        (
-            Some(MarkerDetection {
-                marker_id: "native-heal-marker",
-                pixel_center: marker.pixel_center,
-                coregraphics_logical_center: LogicalPoint {
-                    x: coregraphics_x,
-                    y: coregraphics_y,
-                },
-                appkit_logical_center: LogicalPoint {
-                    x: coregraphics_x,
-                    y: logical_height - coregraphics_y,
-                },
-                pixel_count: marker.pixel_count,
-                threshold: marker.threshold,
-            }),
-            marker_sample,
-        )
+        let marker_candidates: Vec<MarkerCandidate> = raw_candidates
+            .iter()
+            .enumerate()
+            .map(|(index, marker)| {
+                let coregraphics_x = marker.pixel_center.x / scale_x;
+                let coregraphics_y = marker.pixel_center.y / scale_y;
+                MarkerCandidate {
+                    candidate_id: format!("marker-{index}"),
+                    pixel_center: marker.pixel_center,
+                    coregraphics_logical_center: LogicalPoint {
+                        x: coregraphics_x,
+                        y: coregraphics_y,
+                    },
+                    appkit_logical_center: LogicalPoint {
+                        x: coregraphics_x,
+                        y: logical_height - coregraphics_y,
+                    },
+                    bbox: marker.bbox,
+                    pixel_count: marker.pixel_count,
+                    threshold: marker.threshold,
+                }
+            })
+            .collect();
+
+        let marker_detection = marker_candidates.first().map(|marker| MarkerDetection {
+            marker_id: "native-heal-marker",
+            pixel_center: marker.pixel_center,
+            coregraphics_logical_center: marker.coregraphics_logical_center,
+            appkit_logical_center: marker.appkit_logical_center,
+            bbox: marker.bbox,
+            pixel_count: marker.pixel_count,
+            threshold: marker.threshold,
+        });
+
+        (marker_detection, marker_candidates, marker_sample)
     }
 }
 
@@ -916,8 +1046,45 @@ mod tests {
         let marker = detect_marker_from_bgra_like_buffer(&bytes, width, height, bytes_per_row)
             .expect("expected marker detection");
         assert_eq!(marker.pixel_count, 16);
+        assert_eq!(marker.bbox.x, 6);
+        assert_eq!(marker.bbox.y, 4);
+        assert_eq!(marker.bbox.width, 4);
+        assert_eq!(marker.bbox.height, 4);
+        assert_eq!(marker.threshold.max_green, 120);
         assert!((marker.pixel_center.x - 8.0).abs() < f64::EPSILON);
         assert!((marker.pixel_center.y - 6.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn marker_detector_splits_disconnected_magenta_clusters() {
+        let width = 32usize;
+        let height = 12usize;
+        let bytes_per_row = width * 4;
+        let mut bytes = vec![0u8; bytes_per_row * height];
+
+        for (start_x, start_y) in [(2, 3), (14, 3), (25, 3)] {
+            for y in start_y..start_y + 4 {
+                for x in start_x..start_x + 4 {
+                    let offset = y * bytes_per_row + x * 4;
+                    bytes[offset] = 245; // B
+                    bytes[offset + 1] = 80; // G after compositor blending
+                    bytes[offset + 2] = 245; // R
+                    bytes[offset + 3] = 255; // A
+                }
+            }
+        }
+
+        let candidates = super::detect_marker_candidates_from_bgra_like_buffer(
+            &bytes,
+            width,
+            height,
+            bytes_per_row,
+        );
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0].bbox.x, 2);
+        assert_eq!(candidates[1].bbox.x, 14);
+        assert_eq!(candidates[2].bbox.x, 25);
+        assert_eq!(candidates[0].pixel_count, 16);
     }
 
     #[test]

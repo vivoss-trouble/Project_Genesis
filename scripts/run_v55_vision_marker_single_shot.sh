@@ -237,6 +237,7 @@ while time.monotonic() < deadline:
 print(json.dumps({
     "event": "vision_marker_state",
     "marker_detection": marker,
+    "marker_candidates": last_state.get("marker_candidates") if last_state else None,
     "marker_sample": last_state.get("marker_sample") if last_state else None,
     "capture_scope": last_state.get("capture_scope") if last_state else None,
     "window_id": last_state.get("window_id") if last_state else None,

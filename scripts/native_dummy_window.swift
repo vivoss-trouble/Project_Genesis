@@ -14,6 +14,32 @@ struct Config {
     var markerSize: Double = 28
 }
 
+struct TargetSpec {
+    let id: String
+    let label: String
+    let rect: NSRect
+}
+
+func buildTargetSpecs(config: Config) -> [TargetSpec] {
+    [
+        TargetSpec(
+            id: "native-heal-a",
+            label: "HEAL A",
+            rect: NSRect(x: 40, y: config.targetY, width: config.targetWidth, height: config.targetHeight)
+        ),
+        TargetSpec(
+            id: "native-heal-b",
+            label: "HEAL B",
+            rect: NSRect(x: config.targetX, y: config.targetY, width: config.targetWidth, height: config.targetHeight)
+        ),
+        TargetSpec(
+            id: "native-heal-c",
+            label: "HEAL C",
+            rect: NSRect(x: 260, y: config.targetY, width: config.targetWidth, height: config.targetHeight)
+        ),
+    ]
+}
+
 func parseConfig() -> Config {
     var config = Config()
     var index = 1
@@ -50,8 +76,9 @@ func jsonLine(_ payload: [String: Any]) {
 }
 
 func targetPayload(config: Config, event: String) -> [String: Any] {
-    let globalTargetX = config.windowX + config.targetX
-    let globalTargetY = config.windowY + config.targetY
+    let primaryTarget = buildTargetSpecs(config: config)[1]
+    let globalTargetX = config.windowX + primaryTarget.rect.origin.x
+    let globalTargetY = config.windowY + primaryTarget.rect.origin.y
     let centerX = globalTargetX + config.targetWidth / 2.0
     let centerY = globalTargetY + config.targetHeight / 2.0
     let markerX = centerX
@@ -62,6 +89,7 @@ func targetPayload(config: Config, event: String) -> [String: Any] {
         "target_id": "native-heal",
         "marker_id": "native-heal-marker",
         "marker_rgb": ["r": 255, "g": 0, "b": 255],
+        "target_ids": buildTargetSpecs(config: config).map { $0.id },
         "screen_logical_height": screenHeight,
         "window": [
             "x": config.windowX,
@@ -141,16 +169,50 @@ func runtimeTargetPayload(config: Config, event: String, window: NSWindow, view:
         "x": markerCenterX,
         "y": screenHeight > 0.0 ? screenHeight - markerCenterY : markerCenterY,
     ]
+    payload["targets"] = view.targetSpecs.map { target in
+        let targetWindowRect = view.convert(target.rect, to: nil)
+        let targetScreenRect = window.convertToScreen(targetWindowRect)
+        let markerWindowRect = view.convert(view.markerRect(for: target.rect), to: nil)
+        let markerScreenRect = window.convertToScreen(markerWindowRect)
+        return [
+            "id": target.id,
+            "label": target.label,
+            "target_appkit_screen_center": [
+                "x": targetScreenRect.midX,
+                "y": targetScreenRect.midY,
+            ],
+            "target_coregraphics_screen_center": [
+                "x": targetScreenRect.midX,
+                "y": screenHeight > 0.0 ? screenHeight - targetScreenRect.midY : targetScreenRect.midY,
+            ],
+            "marker_appkit_screen_center": [
+                "x": markerScreenRect.midX,
+                "y": markerScreenRect.midY,
+            ],
+            "marker_coregraphics_screen_center": [
+                "x": markerScreenRect.midX,
+                "y": screenHeight > 0.0 ? screenHeight - markerScreenRect.midY : markerScreenRect.midY,
+            ],
+            "target_logical_rect": [
+                "x": target.rect.origin.x,
+                "y": target.rect.origin.y,
+                "width": target.rect.size.width,
+                "height": target.rect.size.height,
+            ],
+        ]
+    }
     return payload
 }
 
 final class DummyView: NSView {
     let config: Config
-    var hitCount = 0
+    let targetSpecs: [TargetSpec]
+    var hitCounts: [String: Int] = [:]
     var trackingArea: NSTrackingArea?
 
     init(config: Config) {
         self.config = config
+        self.targetSpecs = buildTargetSpecs(config: config)
         super.init(frame: NSRect(x: 0, y: 0, width: config.windowWidth, height: config.windowHeight))
         wantsLayer = true
     }
@@ -185,16 +247,6 @@ final class DummyView: NSView {
         NSColor(calibratedWhite: 0.08, alpha: 1.0).setFill()
         bounds.fill()
 
-        let target = targetRect()
-        let color = hitCount == 0
-            ? NSColor(calibratedRed: 0.15, green: 0.9, blue: 0.35, alpha: 1.0)
-            : NSColor(calibratedRed: 0.1, green: 0.55, blue: 1.0, alpha: 1.0)
-        color.setFill()
-        target.fill()
-
-        NSColor.white.setStroke()
-        NSBezierPath(rect: target).stroke()
-
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         let attrs: [NSAttributedString.Key: Any] = [
@@ -202,14 +254,26 @@ final class DummyView: NSView {
             .foregroundColor: NSColor.white,
             .paragraphStyle: paragraph,
         ]
-        let label = hitCount == 0 ? "NATIVE HEAL" : "HIT \(hitCount)"
-        label.draw(in: target.insetBy(dx: 4, dy: 24), withAttributes: attrs)
+        for target in targetSpecs {
+            let hitCount = hitCounts[target.id, default: 0]
+            let color = hitCount == 0
+                ? NSColor(calibratedRed: 0.15, green: 0.9, blue: 0.35, alpha: 1.0)
+                : NSColor(calibratedRed: 0.1, green: 0.55, blue: 1.0, alpha: 1.0)
+            color.setFill()
+            target.rect.fill()
 
-        let marker = markerRect()
-        NSColor.black.setFill()
-        marker.insetBy(dx: -2, dy: -2).fill()
-        NSColor(calibratedRed: 1.0, green: 0.0, blue: 1.0, alpha: 1.0).setFill()
-        marker.fill()
+            NSColor.white.setStroke()
+            NSBezierPath(rect: target.rect).stroke()
+
+            let label = hitCount == 0 ? target.label : "HIT \(hitCount)"
+            label.draw(in: target.rect.insetBy(dx: 4, dy: 24), withAttributes: attrs)
+
+            let marker = markerRect(for: target.rect)
+            NSColor.black.setFill()
+            marker.insetBy(dx: -2, dy: -2).fill()
+            NSColor(calibratedRed: 1.0, green: 0.0, blue: 1.0, alpha: 1.0).setFill()
+            marker.fill()
+        }
 
         let titleAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
@@ -223,12 +287,12 @@ final class DummyView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        if targetRect().contains(point) {
-            hitCount += 1
+        if let target = targetSpecs.first(where: { $0.rect.contains(point) }) {
+            hitCounts[target.id, default: 0] += 1
             jsonLine([
                 "event": "native_dummy_hit",
-                "target_id": "native-heal",
-                "hit_count": hitCount,
+                "target_id": target.id,
+                "hit_count": hitCounts[target.id, default: 0],
                 "local_point": ["x": point.x, "y": point.y],
             ])
             needsDisplay = true
@@ -242,33 +306,35 @@ final class DummyView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        let insideTargets = targetSpecs.filter { $0.rect.contains(point) }.map { $0.id }
         jsonLine([
             "event": "native_dummy_mouse_moved",
-            "inside_target": targetRect().contains(point),
+            "inside_target": !insideTargets.isEmpty,
+            "inside_targets": insideTargets,
             "local_point": ["x": point.x, "y": point.y],
         ])
     }
 
     override func mouseEntered(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        let insideTargets = targetSpecs.filter { $0.rect.contains(point) }.map { $0.id }
         jsonLine([
             "event": "native_dummy_mouse_entered",
-            "inside_target": targetRect().contains(point),
+            "inside_target": !insideTargets.isEmpty,
+            "inside_targets": insideTargets,
             "local_point": ["x": point.x, "y": point.y],
         ])
     }
 
     func targetRect() -> NSRect {
-        NSRect(
-            x: config.targetX,
-            y: config.targetY,
-            width: config.targetWidth,
-            height: config.targetHeight
-        )
+        targetSpecs[1].rect
     }
 
     func markerRect() -> NSRect {
-        let target = targetRect()
+        markerRect(for: targetRect())
+    }
+
+    func markerRect(for target: NSRect) -> NSRect {
         return NSRect(
             x: target.midX - config.markerSize / 2.0,
             y: target.midY - config.markerSize / 2.0,

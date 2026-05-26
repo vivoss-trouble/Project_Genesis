@@ -61,6 +61,8 @@ is a deterministic color-threshold detector for the `native-heal-marker` only:
 - output pixel center in physical capture coordinates
 - output CoreGraphics logical center for `genesis-os-driver`
 - output AppKit logical center for audit comparison
+- `marker_candidates` contains every disconnected marker blob with
+  `candidate_id`, `bbox`, centers, and `pixel_count`
 
 If Screen Recording permission is missing or the marker is not visible,
 `marker_detection` is `null`. This is an observation fact, not an error.
@@ -81,6 +83,7 @@ When `GENESIS_VISION_WINDOW_ID` is present:
 - `window_id` echoes the requested WindowServer id.
 - `physical_pixels`, `logical_bounds`, and `marker_detection` are relative to
   that captured window image.
+- `marker_candidates` are ordered deterministically from left to right.
 - callers must translate the returned window-local CoreGraphics point into the
   global CoreGraphics desktop coordinate before sending it to `genesis-os-driver`.
 
