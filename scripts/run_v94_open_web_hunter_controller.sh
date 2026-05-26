@@ -299,7 +299,7 @@ if factor:
     else:
         clamped_abs = max(24.0, clamped_abs)
     clamped_abs = min(clamped_abs, max_scroll_abs, abs_distance * 0.85)
-    planned_scroll_dy = -clamped_abs if distance_to_safe_center_px > 0 else clamped_abs
+    planned_scroll_dy = clamped_abs if distance_to_safe_center_px > 0 else -clamped_abs
 
 ready_to_fire = occlusion_clear and abs_distance <= safe_band_px
 scroll_point = {

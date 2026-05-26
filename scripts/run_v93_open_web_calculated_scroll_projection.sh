@@ -218,7 +218,7 @@ if factor:
     else:
         clamped_abs = max(24.0, clamped_abs)
     clamped_abs = min(clamped_abs, max_scroll_abs, abs_distance * 0.85)
-    planned_scroll_dy = -clamped_abs if distance_to_safe_center_px > 0 else clamped_abs
+    planned_scroll_dy = clamped_abs if distance_to_safe_center_px > 0 else -clamped_abs
 
 scroll_point = {
     "x": window_x + window_width * 0.55,
