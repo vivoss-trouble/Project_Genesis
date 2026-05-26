@@ -14,6 +14,7 @@ echo "========================================================================"
 
 GENESIS_V63_TARGET_SEQUENCE="$SEQUENCE" \
 GENESIS_V63_SETTLE_MS="$SETTLE_MS" \
+GENESIS_V65_SETTLE_MODE=fixed \
     ./scripts/run_v63_calculator_sequence.sh | tee "$LOG_PATH"
 
 python3 - "$LOG_PATH" "$SEQUENCE" "$SETTLE_MS" <<'PY'

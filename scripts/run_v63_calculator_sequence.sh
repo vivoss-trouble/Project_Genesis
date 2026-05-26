@@ -5,11 +5,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 MAPPER_BIN="${GENESIS_V63_MAPPER_BIN:-/tmp/genesis_calculator_readonly_map_v63}"
+PROBE_BIN="${GENESIS_V65_PROBE_BIN:-/tmp/genesis_v65_calculator_frame_stability_probe}"
 OS_SOCKET="${GENESIS_V63_OS_SOCKET:-/tmp/genesis_os_driver_v63.sock}"
 DRIVER_LOG="${GENESIS_V63_DRIVER_LOG:-/tmp/genesis_os_driver_v63.log}"
 WORK_DIR="${GENESIS_V63_WORK_DIR:-/tmp/genesis_v63_calculator_sequence}"
 SEQUENCE_RAW="${GENESIS_V63_TARGET_SEQUENCE:-calculator-cell-r3-c0,calculator-cell-r3-c3,calculator-cell-r3-c1}"
 SETTLE_MS="${GENESIS_V63_SETTLE_MS:-500}"
+SETTLE_MODE="${GENESIS_V65_SETTLE_MODE:-hybrid}"
 ARMED_TOKEN="GENESIS_V63_ARMED_CALCULATOR"
 AUTO_FIRE_TOKEN="GENESIS_V63_AUTO_FIRE_SEQUENCE"
 DRIVER_PID=""
@@ -58,16 +60,166 @@ print(data.decode("utf-8").strip())
 PY
 }
 
-echo "========================================================================"
-echo "Genesis v6.3 Calculator Sequence Fire-Control Gate"
-echo "========================================================================"
-echo "[v6.3] Sequence: $SEQUENCE_RAW"
-echo "[v6.3] Settle: ${SETTLE_MS}ms"
+now_ms() {
+    python3 - <<'PY'
+import time
+print(f"{time.time() * 1000.0:.3f}")
+PY
+}
 
-python3 - "$SEQUENCE_RAW" "$SETTLE_MS" <<'PY'
+sleep_ms() {
+    local millis="$1"
+    python3 - "$millis" <<'PY'
+import sys
+import time
+
+time.sleep(int(sys.argv[1]) / 1000.0)
+PY
+}
+
+settle_step() {
+    local step_index="$1"
+    local target_id="$2"
+    local started_ms
+    started_ms="$(now_ms)"
+
+    if [[ "$SETTLE_MODE" == "fixed" ]]; then
+        sleep_ms "$SETTLE_MS"
+        python3 - "$started_ms" "$(now_ms)" "$step_index" "$target_id" "$SETTLE_MODE" "$SETTLE_MS" <<'PY'
+import json
 import sys
 
-sequence, settle_ms = sys.argv[1:3]
+started_ms, ended_ms, step_index, target_id, mode, settle_ms = sys.argv[1:7]
+print(json.dumps({
+    "event": "v65_sequence_settle",
+    "step_index": int(step_index),
+    "target_id": target_id,
+    "mode": mode,
+    "stable": True,
+    "elapsed_ms": round(float(ended_ms) - float(started_ms), 3),
+    "fallback_used": False,
+    "fixed_settle_ms": int(settle_ms),
+    "probe_log": None,
+    "posted": False,
+}, sort_keys=True))
+PY
+        return 0
+    fi
+
+    local probe_log="$WORK_DIR/settle_step_${step_index}_${target_id}.jsonl"
+    set +e
+    "$PROBE_BIN" > "$probe_log" 2>&1
+    local probe_status=$?
+    set -e
+
+    if [[ "$probe_status" -eq 0 ]]; then
+        python3 - "$started_ms" "$(now_ms)" "$probe_log" "$probe_status" "$step_index" "$target_id" "$SETTLE_MODE" "$SETTLE_MS" <<'PY'
+import json
+import sys
+
+started_ms, ended_ms, probe_log, probe_status, step_index, target_id, mode, settle_ms = sys.argv[1:9]
+summary = None
+with open(probe_log, "r", encoding="utf-8") as handle:
+    for raw in handle:
+        raw = raw.strip()
+        if not raw.startswith("{"):
+            continue
+        payload = json.loads(raw)
+        if payload.get("event") == "frame_stability_summary":
+            summary = payload
+if summary is None:
+    raise SystemExit(f"[v6.5] missing frame_stability_summary in {probe_log}")
+print(json.dumps({
+    "event": "v65_sequence_settle",
+    "step_index": int(step_index),
+    "target_id": target_id,
+    "mode": mode,
+    "stable": bool(summary.get("stable")),
+    "elapsed_ms": round(float(ended_ms) - float(started_ms), 3),
+    "probe_elapsed_ms": summary.get("elapsed_ms"),
+    "probe_sample_count": summary.get("sample_count"),
+    "probe_stable_run": summary.get("stable_run"),
+    "last_changed_pixel_ratio": summary.get("last_changed_pixel_ratio"),
+    "probe_exit_code": int(probe_status),
+    "fallback_used": False,
+    "fixed_settle_ms": int(settle_ms),
+    "probe_log": probe_log,
+    "posted": False,
+}, sort_keys=True))
+PY
+        return 0
+    fi
+
+    if [[ "$SETTLE_MODE" == "dynamic" ]]; then
+        python3 - "$started_ms" "$(now_ms)" "$probe_log" "$probe_status" "$step_index" "$target_id" "$SETTLE_MODE" "$SETTLE_MS" <<'PY'
+import json
+import sys
+
+started_ms, ended_ms, probe_log, probe_status, step_index, target_id, mode, settle_ms = sys.argv[1:9]
+print(json.dumps({
+    "event": "v65_sequence_settle",
+    "step_index": int(step_index),
+    "target_id": target_id,
+    "mode": mode,
+    "stable": False,
+    "elapsed_ms": round(float(ended_ms) - float(started_ms), 3),
+    "probe_exit_code": int(probe_status),
+    "fallback_used": False,
+    "fixed_settle_ms": int(settle_ms),
+    "probe_log": probe_log,
+    "posted": False,
+}, sort_keys=True))
+PY
+        echo "[v6.5] dynamic settle failed for step $step_index ($target_id); see $probe_log" >&2
+        exit 1
+    fi
+
+    sleep_ms "$SETTLE_MS"
+    python3 - "$started_ms" "$(now_ms)" "$probe_log" "$probe_status" "$step_index" "$target_id" "$SETTLE_MODE" "$SETTLE_MS" <<'PY'
+import json
+import sys
+
+started_ms, ended_ms, probe_log, probe_status, step_index, target_id, mode, settle_ms = sys.argv[1:9]
+summary = None
+with open(probe_log, "r", encoding="utf-8") as handle:
+    for raw in handle:
+        raw = raw.strip()
+        if not raw.startswith("{"):
+            continue
+        payload = json.loads(raw)
+        if payload.get("event") == "frame_stability_summary":
+            summary = payload
+print(json.dumps({
+    "event": "v65_sequence_settle",
+    "step_index": int(step_index),
+    "target_id": target_id,
+    "mode": mode,
+    "stable": bool(summary.get("stable")) if summary else False,
+    "elapsed_ms": round(float(ended_ms) - float(started_ms), 3),
+    "probe_elapsed_ms": summary.get("elapsed_ms") if summary else None,
+    "probe_sample_count": summary.get("sample_count") if summary else None,
+    "probe_stable_run": summary.get("stable_run") if summary else None,
+    "last_changed_pixel_ratio": summary.get("last_changed_pixel_ratio") if summary else None,
+    "probe_exit_code": int(probe_status),
+    "fallback_used": True,
+    "fixed_settle_ms": int(settle_ms),
+    "probe_log": probe_log,
+    "posted": False,
+}, sort_keys=True))
+PY
+}
+
+echo "========================================================================"
+echo "Genesis v6.3/v6.5 Calculator Sequence Fire-Control Gate"
+echo "========================================================================"
+echo "[v6.3] Sequence: $SEQUENCE_RAW"
+echo "[v6.3] Fixed settle: ${SETTLE_MS}ms"
+echo "[v6.5] Settle mode: $SETTLE_MODE"
+
+python3 - "$SEQUENCE_RAW" "$SETTLE_MS" "$SETTLE_MODE" <<'PY'
+import sys
+
+sequence, settle_ms, settle_mode = sys.argv[1:4]
 targets = [item.strip() for item in sequence.split(",") if item.strip()]
 if not targets:
     raise SystemExit("[v6.3] GENESIS_V63_TARGET_SEQUENCE is empty")
@@ -77,6 +229,8 @@ except ValueError as error:
     raise SystemExit(f"[v6.3] GENESIS_V63_SETTLE_MS must be an integer: {error}")
 if settle < 0 or settle > 5000:
     raise SystemExit("[v6.3] GENESIS_V63_SETTLE_MS must be within 0..5000")
+if settle_mode not in {"fixed", "dynamic", "hybrid"}:
+    raise SystemExit("[v6.5] GENESIS_V65_SETTLE_MODE must be fixed, dynamic, or hybrid")
 for target in targets:
     if not target.startswith("calculator-cell-r"):
         raise SystemExit(f"[v6.3] unsupported target id: {target}")
@@ -90,6 +244,9 @@ open -a Calculator || true
 sleep "${GENESIS_V63_CALCULATOR_SETTLE_SEC:-1.0}"
 
 swiftc scripts/calculator_readonly_map.swift -o "$MAPPER_BIN"
+if [[ "$SETTLE_MODE" != "fixed" ]]; then
+    swiftc scripts/probe_v64_calculator_frame_stability.swift -o "$PROBE_BIN"
+fi
 
 ARMED=false
 if [[ "${GENESIS_V63_ARMED_CONFIRM:-}" == "$ARMED_TOKEN" ]]; then
@@ -261,15 +418,11 @@ print(json.dumps({
 }, sort_keys=True))
 PY
 
-    sleep "$(python3 - "$SETTLE_MS" <<'PY'
-import sys
-print(int(sys.argv[1]) / 1000.0)
-PY
-)"
+    settle_step "$STEP_COUNT" "$TARGET_ID"
     STEP_COUNT=$((STEP_COUNT + 1))
 done
 
-echo "{\"event\":\"v63_sequence_summary\",\"armed\":$ARMED,\"step_count\":$STEP_COUNT,\"settle_ms\":$SETTLE_MS,\"posted\":$ARMED}"
+echo "{\"event\":\"v63_sequence_summary\",\"armed\":$ARMED,\"step_count\":$STEP_COUNT,\"settle_ms\":$SETTLE_MS,\"settle_mode\":\"$SETTLE_MODE\",\"posted\":$ARMED}"
 echo "========================================================================"
 echo "Genesis v6.3 Calculator sequence gate complete"
 echo "========================================================================"
