@@ -81,6 +81,37 @@ func targetPayload(config: Config, event: String) -> [String: Any] {
     ]
 }
 
+func runtimeTargetPayload(config: Config, event: String, window: NSWindow, view: DummyView) -> [String: Any] {
+    var payload = targetPayload(config: config, event: event)
+    let targetWindowRect = view.convert(view.targetRect(), to: nil)
+    let targetScreenRect = window.convertToScreen(targetWindowRect)
+    let centerX = targetScreenRect.midX
+    let centerY = targetScreenRect.midY
+    let screenHeight = NSScreen.main?.frame.height ?? 0.0
+
+    payload["window_frame"] = [
+        "x": window.frame.origin.x,
+        "y": window.frame.origin.y,
+        "width": window.frame.size.width,
+        "height": window.frame.size.height,
+    ]
+    payload["target_appkit_screen_rect"] = [
+        "x": targetScreenRect.origin.x,
+        "y": targetScreenRect.origin.y,
+        "width": targetScreenRect.size.width,
+        "height": targetScreenRect.size.height,
+    ]
+    payload["target_appkit_screen_center"] = [
+        "x": centerX,
+        "y": centerY,
+    ]
+    payload["target_coregraphics_screen_center"] = [
+        "x": centerX,
+        "y": screenHeight > 0.0 ? screenHeight - centerY : centerY,
+    ]
+    return payload
+}
+
 final class DummyView: NSView {
     let config: Config
     var hitCount = 0
@@ -183,9 +214,10 @@ let window = NSWindow(
 )
 window.title = "Genesis Native Dummy"
 window.isReleasedWhenClosed = false
-window.contentView = DummyView(config: config)
+let dummyView = DummyView(config: config)
+window.contentView = dummyView
 window.makeKeyAndOrderFront(nil)
 NSApp.activate(ignoringOtherApps: true)
 
-jsonLine(targetPayload(config: config, event: "ready"))
+jsonLine(runtimeTargetPayload(config: config, event: "ready", window: window, view: dummyView))
 app.run()

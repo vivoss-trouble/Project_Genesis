@@ -54,9 +54,40 @@ fi
 
 if [[ "$ARMED" == true ]]; then
     echo "[v5.3] ARMED mode requested. This will open a native window and post one real click."
+    : > "$DUMMY_LOG"
     "$DUMMY_BIN" > "$DUMMY_LOG" 2>&1 &
     DUMMY_PID=$!
-    sleep 1
+    for _ in $(seq 1 80); do
+        READY_JSON="$(python3 - "$DUMMY_LOG" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            payload = json.loads(line)
+            if payload.get("event") == "ready":
+                print(json.dumps(payload, sort_keys=True))
+                raise SystemExit(0)
+except FileNotFoundError:
+    pass
+PY
+)"
+        if [[ -n "$READY_JSON" ]]; then
+            TARGET_JSON="$READY_JSON"
+            echo "[v5.3] Native dummy ready: $TARGET_JSON"
+            break
+        fi
+        sleep 0.1
+    done
+    if [[ -z "${READY_JSON:-}" ]]; then
+        echo "[v5.3] ERROR: native dummy did not report ready geometry"
+        exit 1
+    fi
     cargo run -p genesis-os-driver -- daemon --socket "$SOCKET_PATH" \
         --armed --confirm GENESIS_OS_DRIVER_ARMED > "$DRIVER_LOG" 2>&1 &
 else
@@ -87,9 +118,9 @@ target = json.loads(sys.argv[2])
 armed = sys.argv[3] == "true"
 coordinate_domain = os.environ.get("GENESIS_V53_COORDINATE_DOMAIN", "appkit")
 if coordinate_domain == "appkit":
-    center = target["target_global_logical_center"]
+    center = target.get("target_appkit_screen_center") or target["target_global_logical_center"]
 elif coordinate_domain == "quartz":
-    center = target["target_quartz_logical_center"]
+    center = target.get("target_coregraphics_screen_center") or target["target_quartz_logical_center"]
 else:
     raise SystemExit(f"[v5.3] Unsupported GENESIS_V53_COORDINATE_DOMAIN={coordinate_domain!r}")
 
