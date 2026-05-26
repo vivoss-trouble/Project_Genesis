@@ -80,10 +80,17 @@ func findBrowserWindow() throws -> WindowInfo {
 }
 
 func captureWindow(_ window: WindowInfo) throws -> CGImage {
-    guard let image = CGWindowListCreateImageLegacy(.null, 1 << 3, window.id, 1) else {
-        throw ShadowMapError(description: "CGWindowListCreateImage returned null; Screen Recording permission may be required")
+    let attempts = Int(env["GENESIS_V81_CAPTURE_ATTEMPTS"] ?? "5") ?? 5
+    let sleepUsec = useconds_t((Int(env["GENESIS_V81_CAPTURE_RETRY_MS"] ?? "120") ?? 120) * 1000)
+    for index in 0..<max(1, attempts) {
+        if let image = CGWindowListCreateImageLegacy(.null, 1 << 3, window.id, 1) {
+            return image
+        }
+        if index < attempts - 1 {
+            usleep(sleepUsec)
+        }
     }
-    return image
+    throw ShadowMapError(description: "CGWindowListCreateImage returned null after \(max(1, attempts)) attempts; Screen Recording permission may be required")
 }
 
 func rgbaBuffer(from image: CGImage) throws -> (bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int) {
@@ -114,8 +121,8 @@ func pixelKind(r: UInt8, g: UInt8, b: UInt8, a: UInt8) -> String? {
     let green = Int(g)
     let blue = Int(b)
 
-    if red <= 55 && green <= 70 && blue <= 95 {
-        return "code-block"
+    if red <= 80 && green <= 90 && blue <= 115 {
+        return "dark-pixel"
     }
     if red >= 235 && green >= 185 && green <= 245 && blue <= 190 {
         return "scroll-region"
@@ -272,7 +279,7 @@ func postProcess(_ raw: [RawComponent], width: Int, height: Int) -> [RawComponen
                 && component.bbox.width >= 90
                 && component.bbox.height >= 34
                 && widthRatio <= 0.45
-        case "code-block":
+        case "dark-pixel":
             return component.pixelCount >= 4_000
                 && component.bbox.width >= 240
                 && component.bbox.height >= 80
@@ -290,10 +297,43 @@ func postProcess(_ raw: [RawComponent], width: Int, height: Int) -> [RawComponen
 
     let headings = mergeTextComponents(raw, kind: "heading", xGap: 42, yGap: 30)
         .filter { $0.pixelCount >= 150 && $0.bbox.width >= 140 && $0.bbox.height >= 26 }
+    let codeRegions = filledKinds
+        .filter { $0.kind == "dark-pixel" }
+        .map { $0.bbox.insetBy(dx: -8, dy: -8) }
+    let darkHeadings = mergeTextComponents(raw, kind: "dark-pixel", xGap: 42, yGap: 32)
+        .filter { candidate in
+            candidate.pixelCount >= 180
+                && candidate.bbox.width >= 140
+                && candidate.bbox.height >= 30
+                && candidate.confidence < 0.55
+                && !codeRegions.contains { region in region.intersects(candidate.bbox) }
+        }
+        .map {
+            RawComponent(
+                kind: "heading",
+                bbox: $0.bbox,
+                pixelCenter: $0.pixelCenter,
+                pixelCount: $0.pixelCount,
+                confidence: $0.confidence
+            )
+        }
     let links = mergeTextComponents(raw, kind: "link-like", xGap: 28, yGap: 18)
         .filter { $0.pixelCount >= 80 && $0.bbox.width >= 90 && $0.bbox.height >= 12 }
 
-    return (headings + links + filledKinds).sorted {
+    let normalizedFilledKinds = filledKinds.map { component -> RawComponent in
+        if component.kind == "dark-pixel" {
+            return RawComponent(
+                kind: "code-block",
+                bbox: component.bbox,
+                pixelCenter: component.pixelCenter,
+                pixelCount: component.pixelCount,
+                confidence: component.confidence
+            )
+        }
+        return component
+    }
+
+    return (headings + darkHeadings + links + normalizedFilledKinds).sorted {
         if abs($0.pixelCenter.y - $1.pixelCenter.y) > 18 {
             return $0.pixelCenter.y < $1.pixelCenter.y
         }
