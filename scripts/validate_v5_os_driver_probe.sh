@@ -36,7 +36,9 @@ cargo check -p genesis-os-driver --all-targets
 cargo run -p genesis-os-driver -- probe
 cargo run -p genesis-os-driver -- selftest
 
-cargo run -p genesis-os-driver -- daemon --socket "$SOCKET_PATH" \
+GENESIS_OS_VIEWPORT_X=10 \
+GENESIS_OS_VIEWPORT_Y=20 \
+    cargo run -p genesis-os-driver -- daemon --socket "$SOCKET_PATH" \
     > /tmp/genesis_os_driver_validate.log 2>&1 &
 DRIVER_PID=$!
 wait_for_socket
@@ -78,6 +80,8 @@ assert click["status"] == "ok", click
 assert click["action_id"] == "act-v5-1", click
 assert click["receipt"]["armed"] is False, click
 assert click["receipt"]["posted"] is False, click
+assert click["viewport_offset"] == {"x": 10.0, "y": 20.0}, click
+assert click["receipt"]["point"] == {"x": 110.0, "y": 120.0}, click
 print("[v5-os-driver] daemon dry-run protocol passed")
 PY
 

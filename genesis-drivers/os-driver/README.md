@@ -34,6 +34,18 @@ JSON request per line:
 {"request_id":"click-1","action_id":"act-v5-1","act":"click_point","x":100,"y":100}
 ```
 
+Local physical-field coordinates can be mapped into global macOS coordinates at
+the final driver boundary with viewport offsets:
+
+```bash
+GENESIS_OS_VIEWPORT_X=320 GENESIS_OS_VIEWPORT_Y=180 \
+  cargo run -p genesis-os-driver -- daemon
+```
+
+For the example above, a request with `x=100,y=100` is posted as global
+`x=420,y=280`. The response includes both the `viewport_offset` and the mapped
+receipt point.
+
 The daemon is dry-run unless started with both `--armed` and the confirmation
 token:
 
@@ -65,6 +77,8 @@ If `accessibility_trusted` is `false`, dry-run mode still works, but armed
 
 - The driver owns OS coordinates, display geometry, DPI scale, and native input
   injection.
+- Viewport offsets are owned by the driver, so `genesis-core` can keep emitting
+  local `click_point` coordinates.
 - `genesis-core` remains unaware of Retina scaling, Accessibility prompts, and
   physical cursor APIs.
 - The first backend is macOS CoreGraphics through minimal FFI. Cross-platform

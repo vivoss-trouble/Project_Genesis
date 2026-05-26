@@ -13,6 +13,8 @@ use crate::audit::{AuditEvent, AuditLogger};
 
 const ACTUATOR_SOCKET_PATH: &str = "/tmp/genesis_act.sock";
 const DEFAULT_DYNAMIC_ACTUATOR_SOCKET_PATH: &str = "/tmp/genesis_dynamic_act.sock";
+const OS_ACTUATOR_SOCKET_ENV: &str = "GENESIS_OS_ACT_SOCKET";
+const DYNAMIC_ACTUATOR_SOCKET_ENV: &str = "GENESIS_DYNAMIC_ACT_SOCKET";
 pub const MAX_VERIFIABLE_WAIT_MS: u64 = 2_000;
 pub const COORDINATE_ABS_LIMIT: f64 = 1_000_000.0;
 pub const TARGET_ID_MAX_LEN: usize = 64;
@@ -319,7 +321,8 @@ fn execute_action(command: ActionCommand, auditor: &AuditLogger) {
 
 fn send_to_external_actuator(action_id: &str, action: &GenesisAction) -> Result<(), String> {
     let socket_path = match action {
-        GenesisAction::ClickPoint { .. } => std::env::var("GENESIS_DYNAMIC_ACT_SOCKET")
+        GenesisAction::ClickPoint { .. } => std::env::var(OS_ACTUATOR_SOCKET_ENV)
+            .or_else(|_| std::env::var(DYNAMIC_ACTUATOR_SOCKET_ENV))
             .unwrap_or_else(|_| DEFAULT_DYNAMIC_ACTUATOR_SOCKET_PATH.to_string()),
         _ => ACTUATOR_SOCKET_PATH.to_string(),
     };

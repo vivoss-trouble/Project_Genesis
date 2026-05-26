@@ -122,6 +122,7 @@ struct DaemonOptions {
     socket_path: String,
     armed: bool,
     confirm: Option<String>,
+    viewport: ViewportOffset,
 }
 
 impl DaemonOptions {
@@ -129,12 +130,21 @@ impl DaemonOptions {
         let mut socket_path = DEFAULT_SOCKET_PATH.to_string();
         let mut armed = false;
         let mut confirm = None;
+        let mut viewport = ViewportOffset::from_env()?;
         let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
                 "--socket" => {
                     index += 1;
                     socket_path = parse_string(args, index, "--socket")?;
+                }
+                "--viewport-x" => {
+                    index += 1;
+                    viewport.x = parse_value(args, index, "--viewport-x")?;
+                }
+                "--viewport-y" => {
+                    index += 1;
+                    viewport.y = parse_value(args, index, "--viewport-y")?;
                 }
                 "--armed" => armed = true,
                 "--confirm" => {
@@ -150,7 +160,30 @@ impl DaemonOptions {
             socket_path,
             armed,
             confirm,
+            viewport,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ViewportOffset {
+    x: f64,
+    y: f64,
+}
+
+impl ViewportOffset {
+    fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self {
+            x: parse_env_f64("GENESIS_OS_VIEWPORT_X")?.unwrap_or(0.0),
+            y: parse_env_f64("GENESIS_OS_VIEWPORT_Y")?.unwrap_or(0.0),
+        })
+    }
+
+    fn map(self, point: LogicalPoint) -> LogicalPoint {
+        LogicalPoint {
+            x: point.x + self.x,
+            y: point.y + self.y,
+        }
     }
 }
 
@@ -171,6 +204,7 @@ struct DriverResponse {
     armed: bool,
     probe: Option<genesis_os_driver::DriverProbe>,
     receipt: Option<DriverReceipt>,
+    viewport_offset: Option<LogicalPoint>,
     error: Option<String>,
 }
 
@@ -181,13 +215,13 @@ fn run_daemon(options: &DaemonOptions) -> Result<(), Box<dyn std::error::Error>>
     }
     let listener = UnixListener::bind(socket_path)?;
     eprintln!(
-        "[genesis-os-driver] listening on {} armed={}",
-        options.socket_path, options.armed
+        "[genesis-os-driver] listening on {} armed={} viewport=({}, {})",
+        options.socket_path, options.armed, options.viewport.x, options.viewport.y
     );
 
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => handle_stream(stream, options.armed),
+            Ok(stream) => handle_stream(stream, options.armed, options.viewport),
             Err(error) => eprintln!("[genesis-os-driver] accept failed: {error}"),
         }
     }
@@ -195,7 +229,7 @@ fn run_daemon(options: &DaemonOptions) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-fn handle_stream(stream: UnixStream, armed: bool) {
+fn handle_stream(stream: UnixStream, armed: bool, viewport: ViewportOffset) {
     let Ok(writer) = stream.try_clone() else {
         return;
     };
@@ -205,7 +239,7 @@ fn handle_stream(stream: UnixStream, armed: bool) {
 
     for line in reader.lines() {
         let response = match line {
-            Ok(line) => handle_line(&*driver, &line, armed),
+            Ok(line) => handle_line(&*driver, &line, armed, viewport),
             Err(error) => DriverResponse {
                 status: "error",
                 request_id: None,
@@ -213,6 +247,7 @@ fn handle_stream(stream: UnixStream, armed: bool) {
                 armed,
                 probe: None,
                 receipt: None,
+                viewport_offset: Some(viewport.point()),
                 error: Some(error.to_string()),
             },
         };
@@ -226,6 +261,7 @@ fn handle_line(
     driver: &dyn genesis_os_driver::GenesisPhysicalDriver,
     line: &str,
     armed: bool,
+    viewport: ViewportOffset,
 ) -> DriverResponse {
     let parsed = serde_json::from_str::<DriverRequest>(line);
     let request = match parsed {
@@ -238,6 +274,7 @@ fn handle_line(
                 armed,
                 probe: None,
                 receipt: None,
+                viewport_offset: Some(viewport.point()),
                 error: Some(format!("invalid request JSON: {error}")),
             };
         }
@@ -252,17 +289,18 @@ fn handle_line(
                 armed,
                 probe: Some(driver.probe()),
                 receipt: None,
+                viewport_offset: Some(viewport.point()),
                 error: None,
             };
         }
         "move_mouse" | "move" => request.point().and_then(|point| {
             driver
-                .move_mouse(point, armed)
+                .move_mouse(viewport.map(point), armed)
                 .map_err(|error| error.to_string())
         }),
         "click_left" | "click" | "click_point" => request.point().and_then(|point| {
             driver
-                .click_left(point, armed)
+                .click_left(viewport.map(point), armed)
                 .map_err(|error| error.to_string())
         }),
         other => Err(format!("unsupported os-driver act: {other}")),
@@ -276,6 +314,7 @@ fn handle_line(
             armed,
             probe: None,
             receipt: Some(receipt),
+            viewport_offset: Some(viewport.point()),
             error: None,
         },
         Err(error) => DriverResponse {
@@ -285,8 +324,18 @@ fn handle_line(
             armed,
             probe: None,
             receipt: None,
+            viewport_offset: Some(viewport.point()),
             error: Some(error),
         },
+    }
+}
+
+impl ViewportOffset {
+    fn point(self) -> LogicalPoint {
+        LogicalPoint {
+            x: self.x,
+            y: self.y,
+        }
     }
 }
 
@@ -335,6 +384,14 @@ fn parse_string(
     args.get(index)
         .cloned()
         .ok_or_else(|| format!("{name} requires a value").into())
+}
+
+fn parse_env_f64(name: &str) -> Result<Option<f64>, Box<dyn std::error::Error>> {
+    match std::env::var(name) {
+        Ok(value) if !value.trim().is_empty() => Ok(Some(value.parse::<f64>()?)),
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn center_point(probe: &genesis_os_driver::DriverProbe) -> Option<LogicalPoint> {
