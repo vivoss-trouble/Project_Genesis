@@ -10,6 +10,8 @@ DUMMY_LOG="${GENESIS_V53_DUMMY_LOG:-/tmp/genesis_native_dummy_window.log}"
 DRIVER_LOG="${GENESIS_V53_DRIVER_LOG:-/tmp/genesis_os_driver_v53.log}"
 ARMED_TOKEN="GENESIS_V53_ARMED_NATIVE_DUMMY"
 FIRE_TOKEN="FIRE"
+COORDINATE_DOMAIN="${GENESIS_V53_COORDINATE_DOMAIN:-appkit}"
+POST_CLICK_SETTLE_SEC="${GENESIS_V53_POST_CLICK_SETTLE_SEC:-0.5}"
 DRIVER_PID=""
 DUMMY_PID=""
 
@@ -76,13 +78,20 @@ fi
 
 python3 - "$SOCKET_PATH" "$TARGET_JSON" "$ARMED" <<'PY'
 import json
+import os
 import socket
 import sys
 
 socket_path = sys.argv[1]
 target = json.loads(sys.argv[2])
 armed = sys.argv[3] == "true"
-center = target["target_quartz_logical_center"]
+coordinate_domain = os.environ.get("GENESIS_V53_COORDINATE_DOMAIN", "appkit")
+if coordinate_domain == "appkit":
+    center = target["target_global_logical_center"]
+elif coordinate_domain == "quartz":
+    center = target["target_quartz_logical_center"]
+else:
+    raise SystemExit(f"[v5.3] Unsupported GENESIS_V53_COORDINATE_DOMAIN={coordinate_domain!r}")
 
 def roundtrip(payload):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
@@ -97,7 +106,12 @@ def roundtrip(payload):
     return json.loads(data.decode("utf-8"))
 
 probe = roundtrip({"request_id": "probe-v53", "act": "probe"})
-print(json.dumps({"event": "os_driver_probe", "probe": probe}, sort_keys=True))
+print(json.dumps({
+    "event": "os_driver_probe",
+    "coordinate_domain": coordinate_domain,
+    "target_center": center,
+    "probe": probe,
+}, sort_keys=True))
 if armed and not probe.get("probe", {}).get("accessibility_trusted"):
     raise SystemExit(
         "[v5.3] Accessibility is not trusted; refusing armed click. "
@@ -122,6 +136,7 @@ assert click["receipt"]["posted"] is armed, click
 PY
 
 if [[ "$ARMED" == true ]]; then
+    sleep "$POST_CLICK_SETTLE_SEC"
     echo "[v5.3] Armed single-shot completed. Native dummy log:"
     cat "$DUMMY_LOG" || true
 else
