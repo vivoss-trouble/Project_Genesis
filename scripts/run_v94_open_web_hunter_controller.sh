@@ -20,6 +20,8 @@ MAX_SCROLL_ABS="${GENESIS_V94_MAX_SCROLL_ABS:-720}"
 MAX_STEPS="${GENESIS_V94_MAX_STEPS:-4}"
 DRY_RUN_MAX_STEPS="${GENESIS_V94_DRY_RUN_MAX_STEPS:-1}"
 SCROLL_DX="${GENESIS_V94_SCROLL_DX:-0}"
+SCROLL_PROGRESS_EPS="${GENESIS_V94_SCROLL_PROGRESS_EPS:-2.0}"
+MAX_NO_PROGRESS_STEPS="${GENESIS_V94_MAX_NO_PROGRESS_STEPS:-2}"
 ARMED_TOKEN="GENESIS_V94_ARMED_OPEN_WEB_HUNTER"
 AUTO_FIRE_TOKEN="GENESIS_V94_AUTO_FIRE_HUNTER_SHOT"
 DRIVER_PID=""
@@ -414,6 +416,10 @@ LAST_PLAN_JSON="{}"
 ANY_SCROLL_POSTED=false
 MOVE_POSTED=false
 CLICK_POSTED=false
+PREV_TARGET_ID=""
+PREV_TARGET_Y=""
+NO_PROGRESS_COUNT=0
+LAST_PROGRESS_DELTA_Y=""
 
 for STEP in $(seq 0 $((LOOP_LIMIT - 1))); do
     map_open_web "$STEP"
@@ -427,6 +433,9 @@ for STEP in $(seq 0 $((LOOP_LIMIT - 1))); do
         STOP_REASON="target_not_found"
         break
     fi
+
+    CURRENT_TARGET_ID="$(json_get "$PLAN_JSON" "target_id")"
+    CURRENT_TARGET_Y="$(json_get "$PLAN_JSON" "selected.window_coregraphics_point.y")"
 
     READY="$(json_get "$PLAN_JSON" "ready_to_fire")"
     if [[ "$READY" == "True" || "$READY" == "true" ]]; then
@@ -474,6 +483,64 @@ PY
         break
     fi
 
+    if [[ -n "$PREV_TARGET_ID" && "$CURRENT_TARGET_ID" == "$PREV_TARGET_ID" && "$SCROLL_COUNT" -gt 0 ]]; then
+        PROGRESS_JSON="$(python3 - "$STEP" "$CURRENT_TARGET_ID" "$PREV_TARGET_Y" "$CURRENT_TARGET_Y" "$SCROLL_PROGRESS_EPS" "$NO_PROGRESS_COUNT" "$MAX_NO_PROGRESS_STEPS" <<'PY'
+import json
+import sys
+
+(
+    step_raw,
+    target_id,
+    previous_y_raw,
+    current_y_raw,
+    eps_raw,
+    previous_count_raw,
+    max_no_progress_raw,
+) = sys.argv[1:8]
+
+step = int(step_raw)
+previous_y = float(previous_y_raw)
+current_y = float(current_y_raw)
+eps = float(eps_raw)
+previous_count = int(previous_count_raw)
+max_no_progress = int(max_no_progress_raw)
+delta_y = current_y - previous_y
+delta_abs = abs(delta_y)
+stagnant = delta_abs < eps
+count = previous_count + 1 if stagnant else 0
+
+print(json.dumps({
+    "event": "open_web_hunter_scroll_progress",
+    "step": step,
+    "target_id": target_id,
+    "previous_window_y": previous_y,
+    "current_window_y": current_y,
+    "delta_y": delta_y,
+    "delta_y_abs": delta_abs,
+    "progress_eps_px": eps,
+    "no_progress": stagnant,
+    "no_progress_count": count,
+    "max_no_progress_steps": max_no_progress,
+    "stop_recommended": count >= max_no_progress,
+}, sort_keys=True))
+PY
+)"
+        echo "$PROGRESS_JSON"
+        NO_PROGRESS_COUNT="$(json_get "$PROGRESS_JSON" "no_progress_count")"
+        LAST_PROGRESS_DELTA_Y="$(json_get "$PROGRESS_JSON" "delta_y_abs")"
+        STOP_RECOMMENDED="$(json_get "$PROGRESS_JSON" "stop_recommended")"
+        if [[ "$ARMED" == true && ( "$STOP_RECOMMENDED" == "True" || "$STOP_RECOMMENDED" == "true" ) ]]; then
+            STOP_REASON="scroll_no_progress"
+            break
+        fi
+    elif [[ -n "$PREV_TARGET_ID" && "$CURRENT_TARGET_ID" != "$PREV_TARGET_ID" ]]; then
+        NO_PROGRESS_COUNT=0
+        LAST_PROGRESS_DELTA_Y=""
+    fi
+
+    PREV_TARGET_ID="$CURRENT_TARGET_ID"
+    PREV_TARGET_Y="$CURRENT_TARGET_Y"
+
     SCROLL_X="$(json_get "$PLAN_JSON" "scroll_point.x")"
     SCROLL_Y="$(json_get "$PLAN_JSON" "scroll_point.y")"
     SCROLL_DY="$(json_get "$PLAN_JSON" "planned_scroll_delta.dy")"
@@ -508,7 +575,7 @@ PY
 done
 
 POST_URL="$(front_url)"
-python3 - "$ARMED" "$FIRED" "$STOP_REASON" "$SCROLL_COUNT" "$ANY_SCROLL_POSTED" "$MOVE_POSTED" "$CLICK_POSTED" "$BASE_URL" "$POST_URL" "$LAST_PLAN_JSON" "$MAX_STEPS" <<'PY'
+python3 - "$ARMED" "$FIRED" "$STOP_REASON" "$SCROLL_COUNT" "$ANY_SCROLL_POSTED" "$MOVE_POSTED" "$CLICK_POSTED" "$BASE_URL" "$POST_URL" "$LAST_PLAN_JSON" "$MAX_STEPS" "$NO_PROGRESS_COUNT" "$LAST_PROGRESS_DELTA_Y" "$SCROLL_PROGRESS_EPS" "$MAX_NO_PROGRESS_STEPS" <<'PY'
 import json
 import sys
 
@@ -523,6 +590,10 @@ base_url = sys.argv[8]
 post_url = sys.argv[9]
 last_plan = json.loads(sys.argv[10])
 max_steps = int(sys.argv[11])
+no_progress_count = int(sys.argv[12])
+last_progress_delta_y = None if sys.argv[13] == "" else float(sys.argv[13])
+scroll_progress_eps = float(sys.argv[14])
+max_no_progress_steps = int(sys.argv[15])
 url_changed = bool(base_url and post_url and base_url != post_url)
 
 if armed and fired and not click_posted:
@@ -550,12 +621,16 @@ print(json.dumps({
     "post_url": post_url,
     "url_changed": url_changed,
     "max_steps": max_steps,
+    "scroll_no_progress_count": no_progress_count,
+    "last_scroll_progress_delta_y": last_progress_delta_y,
+    "scroll_progress_eps_px": scroll_progress_eps,
+    "max_no_progress_steps": max_no_progress_steps,
     "posted": any_scroll_posted or move_posted or click_posted,
 }, sort_keys=True))
 PY
 
 if [[ "$ARMED" == true && "$FIRED" != true ]]; then
-    echo "[v9.4] ERROR: armed hunter exhausted max steps without firing" >&2
+    echo "[v9.4] ERROR: armed hunter stopped without firing: $STOP_REASON" >&2
     exit 1
 fi
 
