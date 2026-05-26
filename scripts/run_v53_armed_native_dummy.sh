@@ -10,7 +10,7 @@ DUMMY_LOG="${GENESIS_V53_DUMMY_LOG:-/tmp/genesis_native_dummy_window.log}"
 DRIVER_LOG="${GENESIS_V53_DRIVER_LOG:-/tmp/genesis_os_driver_v53.log}"
 ARMED_TOKEN="GENESIS_V53_ARMED_NATIVE_DUMMY"
 FIRE_TOKEN="FIRE"
-COORDINATE_DOMAIN="${GENESIS_V53_COORDINATE_DOMAIN:-appkit}"
+COORDINATE_DOMAIN="${GENESIS_V53_COORDINATE_DOMAIN:-coregraphics}"
 POST_CLICK_SETTLE_SEC="${GENESIS_V53_POST_CLICK_SETTLE_SEC:-0.5}"
 PRE_CLICK_SETTLE_SEC="${GENESIS_V53_PRE_CLICK_SETTLE_SEC:-0.3}"
 DRIVER_PID=""
@@ -118,10 +118,10 @@ import time
 socket_path = sys.argv[1]
 target = json.loads(sys.argv[2])
 armed = sys.argv[3] == "true"
-coordinate_domain = os.environ.get("GENESIS_V53_COORDINATE_DOMAIN", "appkit")
+coordinate_domain = os.environ.get("GENESIS_V53_COORDINATE_DOMAIN", "coregraphics")
 if coordinate_domain == "appkit":
     center = target.get("target_appkit_screen_center") or target["target_global_logical_center"]
-elif coordinate_domain == "quartz":
+elif coordinate_domain in ("coregraphics", "quartz"):
     center = target.get("target_coregraphics_screen_center") or target["target_quartz_logical_center"]
 else:
     raise SystemExit(f"[v5.3] Unsupported GENESIS_V53_COORDINATE_DOMAIN={coordinate_domain!r}")
