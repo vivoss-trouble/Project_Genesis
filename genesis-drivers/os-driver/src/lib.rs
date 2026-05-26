@@ -8,9 +8,17 @@ pub struct LogicalPoint {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrollUnit {
+    Pixel,
+    Line,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 pub struct ScrollDelta {
     pub dx: f64,
     pub dy: f64,
+    pub unit: ScrollUnit,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -127,6 +135,7 @@ mod platform {
     const K_CG_MOUSE_BUTTON_LEFT: u32 = 0;
     const K_CG_MOUSE_EVENT_CLICK_STATE: u32 = 1;
     const K_CG_SCROLL_EVENT_UNIT_PIXEL: u32 = 0;
+    const K_CG_SCROLL_EVENT_UNIT_LINE: u32 = 1;
 
     #[repr(C)]
     #[derive(Debug, Clone, Copy)]
@@ -176,6 +185,7 @@ mod platform {
         ) -> CGEventRef;
         fn CGEventPost(tap: u32, event: CGEventRef);
         fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
+        fn CGEventSetLocation(event: CGEventRef, location: CGPoint);
         fn CGWarpMouseCursorPosition(new_cursor_position: CGPoint) -> i32;
         fn CGMainDisplayID() -> u32;
     }
@@ -238,7 +248,7 @@ mod platform {
                 require_accessibility()?;
                 warp_mouse(point)?;
                 post_mouse_event(K_CG_EVENT_MOUSE_MOVED, point)?;
-                post_scroll_event(delta)?;
+                post_scroll_event(point, delta)?;
             }
             Ok(receipt_with_delta(
                 "scroll_wheel",
@@ -324,13 +334,13 @@ mod platform {
         Ok(())
     }
 
-    fn post_scroll_event(delta: ScrollDelta) -> Result<(), DriverError> {
+    fn post_scroll_event(point: LogicalPoint, delta: ScrollDelta) -> Result<(), DriverError> {
         let wheel_y = clamp_scroll_value(delta.dy);
         let wheel_x = clamp_scroll_value(delta.dx);
         let event = unsafe {
             CGEventCreateScrollWheelEvent(
                 ptr::null_mut(),
-                K_CG_SCROLL_EVENT_UNIT_PIXEL,
+                scroll_unit_code(delta.unit),
                 2,
                 wheel_y,
                 wheel_x,
@@ -342,10 +352,24 @@ mod platform {
             ));
         }
         unsafe {
+            CGEventSetLocation(
+                event,
+                CGPoint {
+                    x: point.x,
+                    y: point.y,
+                },
+            );
             CGEventPost(K_CG_HID_EVENT_TAP, event);
             CFRelease(event.cast_const());
         }
         Ok(())
+    }
+
+    fn scroll_unit_code(unit: super::ScrollUnit) -> u32 {
+        match unit {
+            super::ScrollUnit::Pixel => K_CG_SCROLL_EVENT_UNIT_PIXEL,
+            super::ScrollUnit::Line => K_CG_SCROLL_EVENT_UNIT_LINE,
+        }
     }
 
     fn clamp_scroll_value(value: f64) -> i32 {

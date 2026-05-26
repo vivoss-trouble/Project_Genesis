@@ -1,4 +1,4 @@
-use genesis_os_driver::{DriverReceipt, LogicalPoint, ScrollDelta, default_driver};
+use genesis_os_driver::{DriverReceipt, LogicalPoint, ScrollDelta, ScrollUnit, default_driver};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -196,6 +196,7 @@ struct DriverRequest {
     y: Option<f64>,
     dx: Option<f64>,
     dy: Option<f64>,
+    scroll_unit: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -359,7 +360,16 @@ impl DriverRequest {
         Ok(ScrollDelta {
             dx: self.dx.unwrap_or(0.0),
             dy: self.dy.ok_or("missing dy")?,
+            unit: parse_scroll_unit(self.scroll_unit.as_deref())?,
         })
+    }
+}
+
+fn parse_scroll_unit(value: Option<&str>) -> Result<ScrollUnit, String> {
+    match value.unwrap_or("pixel") {
+        "pixel" | "pixels" => Ok(ScrollUnit::Pixel),
+        "line" | "lines" => Ok(ScrollUnit::Line),
+        other => Err(format!("unsupported scroll_unit: {other}")),
     }
 }
 
