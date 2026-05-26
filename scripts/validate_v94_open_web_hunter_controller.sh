@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 LOG_PATH="${GENESIS_VALIDATE_V94_LOG:-/tmp/genesis_validate_v94_open_web_hunter_controller.log}"
+MISSING_LOG_PATH="${GENESIS_VALIDATE_V94_MISSING_LOG:-/tmp/genesis_validate_v94_open_web_hunter_missing_target.log}"
 
 echo "========================================================================"
 echo "Genesis v9.4 Open-Web Hunter Controller Validation"
@@ -91,6 +92,65 @@ print(json.dumps({
     "damping_band": plan.get("damping_band"),
     "damping_factor": plan.get("damping_factor"),
     "planned_scroll_delta": plan.get("planned_scroll_delta"),
+    "stop_reason": summary.get("stop_reason"),
+    "posted": False,
+}, sort_keys=True))
+PY
+
+GENESIS_V94_TARGET_ID="missing-v94-target-for-redline" \
+GENESIS_V94_OUTPUT_DIR="${GENESIS_V94_MISSING_OUTPUT_DIR:-/tmp/genesis_v94_open_web_hunter_missing_target}" \
+    ./scripts/run_v94_open_web_hunter_controller.sh | tee "$MISSING_LOG_PATH"
+
+python3 - "$MISSING_LOG_PATH" <<'PY'
+import json
+import sys
+
+log_path = sys.argv[1]
+plan = None
+summary = None
+scrolls = []
+
+with open(log_path, "r", encoding="utf-8") as handle:
+    for raw in handle:
+        raw = raw.strip()
+        if not raw.startswith("{"):
+            continue
+        payload = json.loads(raw)
+        event = payload.get("event")
+        if event == "open_web_hunter_step_plan":
+            plan = payload
+        elif event == "os_driver_scroll":
+            scrolls.append(payload)
+        elif event == "v94_open_web_hunter_controller_summary":
+            summary = payload
+
+if plan is None:
+    raise SystemExit("[v9.4] missing target-not-found plan")
+if summary is None:
+    raise SystemExit("[v9.4] missing target-not-found summary")
+if scrolls:
+    raise SystemExit(f"[v9.4] target-not-found redline must not scroll: {scrolls}")
+
+if plan.get("target_found") is not False:
+    raise SystemExit(f"[v9.4] missing target should emit target_found=false: {plan}")
+if plan.get("target_not_found_reason") != "requested_target_id_missing":
+    raise SystemExit(f"[v9.4] unexpected missing-target reason: {plan}")
+if summary.get("stop_reason") != "target_not_found":
+    raise SystemExit(f"[v9.4] missing target should stop with target_not_found: {summary}")
+if (
+    summary.get("posted") is not False
+    or summary.get("scroll_posted") is not False
+    or summary.get("move_posted") is not False
+    or summary.get("click_posted") is not False
+):
+    raise SystemExit(f"[v9.4] target-not-found redline leaked physical action: {summary}")
+if summary.get("url_changed") is not False:
+    raise SystemExit(f"[v9.4] target-not-found redline changed URL: {summary}")
+
+print(json.dumps({
+    "event": "v94_open_web_hunter_target_not_found_assertions",
+    "target_found": plan.get("target_found"),
+    "reason": plan.get("target_not_found_reason"),
     "stop_reason": summary.get("stop_reason"),
     "posted": False,
 }, sort_keys=True))

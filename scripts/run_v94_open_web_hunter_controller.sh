@@ -86,13 +86,31 @@ on run argv
     set targetUrl to item 1 of argv
     tell application "Safari"
         activate
-        open location targetUrl
+        if not (exists front document) then
+            make new document with properties {URL:targetUrl}
+        else
+            set URL of front document to targetUrl
+        end if
     end tell
 end run
 OSA
     else
         open -a "$BROWSER_APP" "$url" || open "$url"
     fi
+}
+
+wait_for_target_url() {
+    local url="$1"
+    local current=""
+    for _ in $(seq 1 80); do
+        current="$(front_url || true)"
+        if [[ "$current" == "$url"* ]]; then
+            return
+        fi
+        sleep 0.25
+    done
+    echo "[v9.4] ERROR: front browser URL did not settle on $url (current: $current)" >&2
+    exit 1
 }
 
 front_url() {
@@ -176,7 +194,7 @@ def inside_bbox(point, bbox):
 if requested_target_id:
     selected = next((item for item in targets if item.get("target_id") == requested_target_id), None)
     if selected is None:
-        raise SystemExit(f"[v9.4] target_id not found: {requested_target_id}")
+        target_not_found_reason = "requested_target_id_missing"
 else:
     candidates = [
         item for item in targets
@@ -205,7 +223,37 @@ else:
         raise SystemExit(f"[v9.4] unsupported target strategy: {target_strategy}")
     selected = candidates[0] if candidates else None
     if selected is None:
-        raise SystemExit(f"[v9.4] no target with control_kind={target_kind}")
+        target_not_found_reason = "no_candidate_for_kind"
+
+if selected is None:
+    scroll_point = {
+        "x": window_x + window_width * 0.55,
+        "y": window_y + window_height * 0.55,
+    }
+    print(json.dumps({
+        "event": "open_web_hunter_step_plan",
+        "step": step,
+        "target_found": False,
+        "target_not_found_reason": target_not_found_reason,
+        "requested_target_id": requested_target_id,
+        "target_id": None,
+        "target_kind": target_kind,
+        "target_strategy": target_strategy,
+        "map_target_count": len(targets),
+        "window_bounds": window_bounds,
+        "safe_center_ratio": safe_center_ratio,
+        "safe_band_px": safe_band_px,
+        "damping_factor": 0.0,
+        "damping_band": "target_not_found",
+        "planned_scroll_delta": {"dx": 0.0, "dy": 0.0},
+        "scroll_point": scroll_point,
+        "occlusion_clear": False,
+        "sticky_occluders": [],
+        "ready_to_fire": False,
+        "planner_contract": "bounded_hunter_controller_remap_required",
+        "posted": False,
+    }, sort_keys=True))
+    raise SystemExit(0)
 
 point = selected.get("global_coregraphics_point") or {}
 window_point = selected.get("window_coregraphics_point") or {}
@@ -262,6 +310,7 @@ scroll_point = {
 print(json.dumps({
     "event": "open_web_hunter_step_plan",
     "step": step,
+    "target_found": True,
     "target_id": selected.get("target_id"),
     "target_kind": selected.get("control_kind"),
     "target_strategy": target_strategy,
@@ -315,6 +364,7 @@ mkdir -p "$OUTPUT_DIR"
 swiftc scripts/open_web_shadow_map.swift -o "$MAPPER_BIN"
 
 open_target_url "$TARGET_URL"
+wait_for_target_url "$TARGET_URL"
 sleep "${GENESIS_V94_BROWSER_SETTLE_SEC:-2.5}"
 BASE_URL="$(front_url)"
 
@@ -371,6 +421,12 @@ for STEP in $(seq 0 $((LOOP_LIMIT - 1))); do
     PLAN_JSON="$(plan_step "$STEP_LOG" "$STEP")"
     LAST_PLAN_JSON="$PLAN_JSON"
     echo "$PLAN_JSON"
+
+    TARGET_FOUND="$(json_get "$PLAN_JSON" "target_found")"
+    if [[ "$TARGET_FOUND" == "False" || "$TARGET_FOUND" == "false" ]]; then
+        STOP_REASON="target_not_found"
+        break
+    fi
 
     READY="$(json_get "$PLAN_JSON" "ready_to_fire")"
     if [[ "$READY" == "True" || "$READY" == "true" ]]; then
@@ -483,6 +539,8 @@ print(json.dumps({
     "scroll_posted": any_scroll_posted,
     "move_posted": move_posted,
     "click_posted": click_posted,
+    "target_found": last_plan.get("target_found"),
+    "target_not_found_reason": last_plan.get("target_not_found_reason"),
     "target_id": last_plan.get("target_id"),
     "last_damping_band": last_plan.get("damping_band"),
     "last_damping_factor": last_plan.get("damping_factor"),
