@@ -37,6 +37,7 @@ The daemon emits only physical constants and timestamps:
 - `frame_id`
 - `captured_at_ms`
 - `served_at_ms`
+- `capture_scope`
 - `physical_pixels`
 - `logical_bounds`
 - `scale_factor`
@@ -56,10 +57,33 @@ The frame state may include a `marker_detection` object when the controlled
 Native Dummy marker is visible and Screen Recording permission is granted. This
 is a deterministic color-threshold detector for the `native-heal-marker` only:
 
-- threshold: `R >= 220`, `G <= 45`, `B >= 220`
+- threshold: `R >= 200`, `G <= 120`, `B >= 200`
 - output pixel center in physical capture coordinates
 - output CoreGraphics logical center for `genesis-os-driver`
 - output AppKit logical center for audit comparison
 
 If Screen Recording permission is missing or the marker is not visible,
 `marker_detection` is `null`. This is an observation fact, not an error.
+
+## v5.6 Window-Scoped Capture
+
+For controlled native-window tests, the daemon can capture a single WindowServer
+surface instead of the full display:
+
+```bash
+GENESIS_VISION_WINDOW_ID=12345 \
+  cargo run -p genesis-frame-grabber -- daemon --socket /tmp/genesis_vision_daemon.sock --hz 10
+```
+
+When `GENESIS_VISION_WINDOW_ID` is present:
+
+- `capture_scope` is `window`.
+- `window_id` echoes the requested WindowServer id.
+- `physical_pixels`, `logical_bounds`, and `marker_detection` are relative to
+  that captured window image.
+- callers must translate the returned window-local CoreGraphics point into the
+  global CoreGraphics desktop coordinate before sending it to `genesis-os-driver`.
+
+Window-scoped capture avoids full-screen Z-order contamination from terminal
+windows and other unrelated UI while keeping Screen Recording permission as the
+single macOS vision gate.

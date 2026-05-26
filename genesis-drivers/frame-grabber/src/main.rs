@@ -162,9 +162,11 @@ struct FrameState {
     served_at_ms: u64,
     backend: &'static str,
     platform: &'static str,
+    capture_scope: &'static str,
     capture_supported: bool,
     screen_capture_allowed: bool,
     display_id: Option<u32>,
+    window_id: Option<u32>,
     physical_pixels: Option<PixelSize>,
     logical_bounds: Option<LogicalBounds>,
     scale_factor: Option<f64>,
@@ -182,9 +184,11 @@ struct FrameState {
 struct FrameProbe {
     backend: &'static str,
     platform: &'static str,
+    capture_scope: &'static str,
     capture_supported: bool,
     screen_capture_allowed: bool,
     display_id: Option<u32>,
+    window_id: Option<u32>,
     pixel_width: Option<usize>,
     pixel_height: Option<usize>,
     logical_width: Option<f64>,
@@ -203,9 +207,11 @@ impl From<FrameState> for FrameProbe {
         Self {
             backend: state.backend,
             platform: state.platform,
+            capture_scope: state.capture_scope,
             capture_supported: state.capture_supported,
             screen_capture_allowed: state.screen_capture_allowed,
             display_id: state.display_id,
+            window_id: state.window_id,
             pixel_width: state.physical_pixels.as_ref().map(|pixels| pixels.width),
             pixel_height: state.physical_pixels.as_ref().map(|pixels| pixels.height),
             logical_width: state.logical_bounds.as_ref().map(|bounds| bounds.width),
@@ -369,9 +375,11 @@ fn capture_frame_state(frame_id: u64) -> FrameState {
         served_at_ms: 0,
         backend: "unsupported",
         platform: std::env::consts::OS,
+        capture_scope: "unsupported",
         capture_supported: false,
         screen_capture_allowed: false,
         display_id: None,
+        window_id: None,
         physical_pixels: None,
         logical_bounds: None,
         scale_factor: None,
@@ -443,9 +451,9 @@ fn detect_marker_from_bgra_like_buffer(
     bytes_per_row: usize,
 ) -> Option<RawMarkerDetection> {
     const THRESHOLD: MarkerThreshold = MarkerThreshold {
-        min_red: 220,
-        max_green: 45,
-        min_blue: 220,
+        min_red: 200,
+        max_green: 120,
+        min_blue: 200,
     };
 
     if width == 0 || height == 0 || bytes_per_row < width.saturating_mul(4) {
@@ -527,9 +535,9 @@ fn sample_pixel_from_bgra_like_buffer(
     logical_point: LogicalPoint,
 ) -> Option<MarkerSample> {
     const THRESHOLD: MarkerThreshold = MarkerThreshold {
-        min_red: 220,
-        max_green: 45,
-        min_blue: 220,
+        min_red: 200,
+        max_green: 120,
+        min_blue: 200,
     };
 
     if pixel_x >= width || pixel_y >= height || bytes_per_row < width.saturating_mul(4) {
@@ -619,6 +627,12 @@ mod macos {
         fn CGImageGetHeight(image: CGImageRef) -> usize;
         fn CGImageGetWidth(image: CGImageRef) -> usize;
         fn CGMainDisplayID() -> u32;
+        fn CGWindowListCreateImage(
+            screen_bounds: CGRect,
+            list_option: u32,
+            window_id: u32,
+            image_option: u32,
+        ) -> CGImageRef;
     }
 
     pub fn capture_frame_state(frame_id: u64) -> FrameState {
@@ -636,9 +650,20 @@ mod macos {
             (None, Some(y)) => Some(y),
             (None, None) => None,
         };
+        let window_id = target_window_id();
+        let capture_scope = if window_id.is_some() {
+            "window"
+        } else {
+            "display"
+        };
 
         let start = Instant::now();
-        let image = unsafe { CGDisplayCreateImage(display_id) };
+        let image = match window_id {
+            Some(window_id) => unsafe {
+                CGWindowListCreateImage(cg_rect_null(), 1 << 3, window_id, 1)
+            },
+            None => unsafe { CGDisplayCreateImage(display_id) },
+        };
         let capture_latency_ms = start.elapsed().as_secs_f64() * 1000.0;
         let captured_at_ms = current_ts();
 
@@ -649,9 +674,11 @@ mod macos {
                 served_at_ms: 0,
                 backend: "macos-coregraphics",
                 platform: "macos",
+                capture_scope,
                 capture_supported: true,
                 screen_capture_allowed: false,
                 display_id: Some(display_id),
+                window_id,
                 physical_pixels: Some(PixelSize {
                     width: display_pixel_width,
                     height: display_pixel_height,
@@ -668,10 +695,15 @@ mod macos {
                 capture_latency_ms,
                 marker_detection: None,
                 marker_sample: None,
-                error: Some(
-                    "CGDisplayCreateImage returned null; Screen Recording permission may be required"
-                        .to_string(),
-                ),
+                error: Some(match window_id {
+                    Some(window_id) => format!(
+                        "CGWindowListCreateImage returned null for window_id={window_id}; Screen Recording permission or a visible window may be required"
+                    ),
+                    None => {
+                        "CGDisplayCreateImage returned null; Screen Recording permission may be required"
+                            .to_string()
+                    }
+                }),
             };
         }
 
@@ -679,15 +711,31 @@ mod macos {
         let height = unsafe { CGImageGetHeight(image) };
         let bytes_per_row = unsafe { CGImageGetBytesPerRow(image) };
         let bits_per_pixel = unsafe { CGImageGetBitsPerPixel(image) };
+        let capture_scale_x = window_id
+            .and_then(|_| parse_env_f64("GENESIS_VISION_WINDOW_LOGICAL_WIDTH"))
+            .and_then(|logical_width| scale(width, logical_width))
+            .or(scale_x);
+        let capture_scale_y = window_id
+            .and_then(|_| parse_env_f64("GENESIS_VISION_WINDOW_LOGICAL_HEIGHT"))
+            .and_then(|logical_height| scale(height, logical_height))
+            .or(scale_y);
+        let capture_scale_factor = match (capture_scale_x, capture_scale_y) {
+            (Some(x), Some(y)) => Some((x + y) / 2.0),
+            (Some(x), None) => Some(x),
+            (None, Some(y)) => Some(y),
+            (None, None) => scale_factor,
+        };
+        let capture_logical_width = width as f64 / capture_scale_x.unwrap_or(1.0);
+        let capture_logical_height = height as f64 / capture_scale_y.unwrap_or(1.0);
         let (marker_detection, marker_sample) = analyze_marker(
             image,
             width,
             height,
             bytes_per_row,
             bits_per_pixel,
-            scale_x,
-            scale_y,
-            logical_height,
+            capture_scale_x,
+            capture_scale_y,
+            capture_logical_height,
         );
         unsafe {
             CFRelease(image.cast_const());
@@ -699,17 +747,19 @@ mod macos {
             served_at_ms: 0,
             backend: "macos-coregraphics",
             platform: "macos",
+            capture_scope,
             capture_supported: true,
             screen_capture_allowed: true,
             display_id: Some(display_id),
+            window_id,
             physical_pixels: Some(PixelSize { width, height }),
             logical_bounds: Some(LogicalBounds {
-                width: logical_width,
-                height: logical_height,
+                width: capture_logical_width,
+                height: capture_logical_height,
             }),
-            scale_factor,
-            scale_x,
-            scale_y,
+            scale_factor: capture_scale_factor,
+            scale_x: capture_scale_x,
+            scale_y: capture_scale_y,
             bytes_per_row: Some(bytes_per_row),
             bits_per_pixel: Some(bits_per_pixel),
             capture_latency_ms,
@@ -724,6 +774,33 @@ mod macos {
             Some(pixel_size as f64 / logical_size)
         } else {
             None
+        }
+    }
+
+    fn target_window_id() -> Option<u32> {
+        std::env::var("GENESIS_VISION_WINDOW_ID")
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .filter(|window_id| *window_id > 0)
+    }
+
+    fn parse_env_f64(key: &str) -> Option<f64> {
+        std::env::var(key)
+            .ok()
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+    }
+
+    fn cg_rect_null() -> CGRect {
+        CGRect {
+            origin: CGPoint {
+                x: f64::INFINITY,
+                y: f64::INFINITY,
+            },
+            size: CGSize {
+                width: 0.0,
+                height: 0.0,
+            },
         }
     }
 

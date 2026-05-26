@@ -106,6 +106,7 @@ func runtimeTargetPayload(config: Config, event: String, window: NSWindow, view:
     let markerCenterY = markerScreenRect.midY
     let screenHeight = NSScreen.main?.frame.height ?? 0.0
 
+    payload["window_number"] = window.windowNumber
     payload["window_frame"] = [
         "x": window.frame.origin.x,
         "y": window.frame.origin.y,

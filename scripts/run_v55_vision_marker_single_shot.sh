@@ -99,19 +99,65 @@ elif [[ "${GENESIS_V55_VISIBLE_CONFIRM:-}" != "$VISIBLE_TOKEN" ]]; then
     fi
 fi
 
+WINDOW_ID="$(python3 - "$READY_JSON" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+window_id = payload.get("window_number")
+print("" if window_id is None else window_id)
+PY
+)"
+
 SAMPLE_XY="$(python3 - "$READY_JSON" <<'PY'
 import json
 import sys
 
 payload = json.loads(sys.argv[1])
-center = payload["marker_coregraphics_screen_center"]
-print(f'{center["x"]} {center["y"]}')
+window_id = payload.get("window_number")
+if window_id:
+    center = payload["marker_coregraphics_screen_center"]
+    frame = payload["window_frame"]
+    screen_height = payload["screen_logical_height"]
+    window_top_y = screen_height - (frame["y"] + frame["height"])
+    print(f'{center["x"] - frame["x"]} {center["y"] - window_top_y}')
+else:
+    center = payload["marker_coregraphics_screen_center"]
+    print(f'{center["x"]} {center["y"]}')
 PY
 )"
 read -r SAMPLE_X SAMPLE_Y <<< "$SAMPLE_XY"
 
+if [[ -n "$WINDOW_ID" ]]; then
+    echo "[v5.5] Using window-scoped capture for Native Dummy window_id=$WINDOW_ID"
+else
+    echo "[v5.5] Native Dummy did not expose window_number; falling back to display capture."
+fi
+
+VISION_ENV=(
+    "GENESIS_VISION_SAMPLE_X=$SAMPLE_X"
+    "GENESIS_VISION_SAMPLE_Y=$SAMPLE_Y"
+)
+if [[ -n "$WINDOW_ID" ]]; then
+    WINDOW_LOGICAL_SIZE="$(python3 - "$READY_JSON" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+frame = payload["window_frame"]
+print(f'{frame["width"]} {frame["height"]}')
+PY
+)"
+    read -r WINDOW_LOGICAL_WIDTH WINDOW_LOGICAL_HEIGHT <<< "$WINDOW_LOGICAL_SIZE"
+    VISION_ENV+=(
+        "GENESIS_VISION_WINDOW_ID=$WINDOW_ID"
+        "GENESIS_VISION_WINDOW_LOGICAL_WIDTH=$WINDOW_LOGICAL_WIDTH"
+        "GENESIS_VISION_WINDOW_LOGICAL_HEIGHT=$WINDOW_LOGICAL_HEIGHT"
+    )
+fi
+
 rm -f "$VISION_SOCKET" "$OS_SOCKET" "$VISION_LOG" "$DRIVER_LOG"
-GENESIS_VISION_SAMPLE_X="$SAMPLE_X" GENESIS_VISION_SAMPLE_Y="$SAMPLE_Y" \
+env "${VISION_ENV[@]}" \
     cargo run -p genesis-frame-grabber -- daemon --socket "$VISION_SOCKET" --hz "$VISION_HZ" \
     > "$VISION_LOG" 2>&1 &
 VISION_PID=$!
@@ -145,7 +191,7 @@ elif [[ "$ARMED" == true && "${GENESIS_V55_FIRE_CONFIRM:-}" != "$FIRE_TOKEN" ]];
     fi
 fi
 
-python3 - "$VISION_SOCKET" "$OS_SOCKET" "$ARMED" "$MARKER_WAIT_SEC" <<'PY'
+python3 - "$VISION_SOCKET" "$OS_SOCKET" "$ARMED" "$MARKER_WAIT_SEC" "$READY_JSON" <<'PY'
 import json
 import socket
 import sys
@@ -155,6 +201,7 @@ vision_socket = sys.argv[1]
 os_socket = sys.argv[2]
 armed = sys.argv[3] == "true"
 marker_wait_sec = float(sys.argv[4])
+ready = json.loads(sys.argv[5])
 
 
 def roundtrip(socket_path, payload):
@@ -191,6 +238,8 @@ print(json.dumps({
     "event": "vision_marker_state",
     "marker_detection": marker,
     "marker_sample": last_state.get("marker_sample") if last_state else None,
+    "capture_scope": last_state.get("capture_scope") if last_state else None,
+    "window_id": last_state.get("window_id") if last_state else None,
     "bits_per_pixel": last_state.get("bits_per_pixel") if last_state else None,
     "bytes_per_row": last_state.get("bytes_per_row") if last_state else None,
     "screen_capture_allowed": last_state.get("screen_capture_allowed") if last_state else None,
@@ -206,6 +255,22 @@ if not marker:
     )
 
 point = marker["coregraphics_logical_center"]
+if last_state.get("capture_scope") == "window":
+    frame = ready["window_frame"]
+    screen_height = ready["screen_logical_height"]
+    window_top_y = screen_height - (frame["y"] + frame["height"])
+    point = {
+        "x": frame["x"] + point["x"],
+        "y": window_top_y + point["y"],
+    }
+
+print(json.dumps({
+    "event": "vision_action_point",
+    "capture_scope": last_state.get("capture_scope"),
+    "window_id": last_state.get("window_id"),
+    "coregraphics_logical_point": point,
+}, sort_keys=True))
+
 probe = roundtrip(os_socket, {"request_id": "probe-v55", "act": "probe"})
 print(json.dumps({"event": "os_driver_probe", "probe": probe}, sort_keys=True))
 if armed and not probe.get("probe", {}).get("accessibility_trusted"):
