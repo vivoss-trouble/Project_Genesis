@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+SOCKET_PATH="${GENESIS_V53_OS_SOCKET:-/tmp/genesis_os_driver_v53.sock}"
+DUMMY_BIN="${GENESIS_V53_DUMMY_BIN:-/tmp/genesis_native_dummy_window}"
+DUMMY_LOG="${GENESIS_V53_DUMMY_LOG:-/tmp/genesis_native_dummy_window.log}"
+DRIVER_LOG="${GENESIS_V53_DRIVER_LOG:-/tmp/genesis_os_driver_v53.log}"
+ARMED_TOKEN="GENESIS_V53_ARMED_NATIVE_DUMMY"
+DRIVER_PID=""
+DUMMY_PID=""
+
+cleanup() {
+    if [[ -n "$DRIVER_PID" ]] && kill -0 "$DRIVER_PID" 2>/dev/null; then
+        kill "$DRIVER_PID" 2>/dev/null || true
+        wait "$DRIVER_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$DUMMY_PID" ]] && kill -0 "$DUMMY_PID" 2>/dev/null; then
+        kill "$DUMMY_PID" 2>/dev/null || true
+        wait "$DUMMY_PID" 2>/dev/null || true
+    fi
+    rm -f "$SOCKET_PATH"
+}
+trap cleanup EXIT INT TERM
+
+wait_for_socket() {
+    for _ in $(seq 1 80); do
+        if [[ -S "$SOCKET_PATH" ]]; then
+            return
+        fi
+        sleep 0.1
+    done
+    echo "[v5.3] ERROR: timed out waiting for $SOCKET_PATH" >&2
+    exit 1
+}
+
+echo "========================================================================"
+echo "Genesis v5.3 Armed Native Dummy Manual Gate"
+echo "========================================================================"
+
+swiftc scripts/native_dummy_window.swift -o "$DUMMY_BIN"
+TARGET_JSON="$("$DUMMY_BIN" --selftest)"
+printf '%s\n' "$TARGET_JSON"
+
+ARMED=false
+if [[ "${GENESIS_V53_ARMED_CONFIRM:-}" == "$ARMED_TOKEN" ]]; then
+    ARMED=true
+fi
+
+if [[ "$ARMED" == true ]]; then
+    echo "[v5.3] ARMED mode requested. This will open a native window and post one real click."
+    "$DUMMY_BIN" > "$DUMMY_LOG" 2>&1 &
+    DUMMY_PID=$!
+    sleep 1
+    cargo run -p genesis-os-driver -- daemon --socket "$SOCKET_PATH" \
+        --armed --confirm GENESIS_OS_DRIVER_ARMED > "$DRIVER_LOG" 2>&1 &
+else
+    echo "[v5.3] Dry-run mode. Set GENESIS_V53_ARMED_CONFIRM=$ARMED_TOKEN to post a real click."
+    cargo run -p genesis-os-driver -- daemon --socket "$SOCKET_PATH" \
+        > "$DRIVER_LOG" 2>&1 &
+fi
+DRIVER_PID=$!
+wait_for_socket
+
+python3 - "$SOCKET_PATH" "$TARGET_JSON" "$ARMED" <<'PY'
+import json
+import socket
+import sys
+
+socket_path = sys.argv[1]
+target = json.loads(sys.argv[2])
+armed = sys.argv[3] == "true"
+center = target["target_quartz_logical_center"]
+
+def roundtrip(payload):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.connect(socket_path)
+        client.sendall(json.dumps(payload).encode("utf-8") + b"\n")
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = client.recv(8192)
+            if not chunk:
+                break
+            data += chunk
+    return json.loads(data.decode("utf-8"))
+
+probe = roundtrip({"request_id": "probe-v53", "act": "probe"})
+print(json.dumps({"event": "os_driver_probe", "probe": probe}, sort_keys=True))
+if armed and not probe.get("probe", {}).get("accessibility_trusted"):
+    raise SystemExit("[v5.3] Accessibility is not trusted; refusing armed click")
+
+click = roundtrip(
+    {
+        "request_id": "click-v53-native-dummy",
+        "action_id": "act-v53-native-dummy",
+        "act": "click_point",
+        "x": center["x"],
+        "y": center["y"],
+    }
+)
+print(json.dumps({"event": "os_driver_click", "click": click}, sort_keys=True))
+
+assert click["status"] == "ok", click
+assert click["action_id"] == "act-v53-native-dummy", click
+assert click["receipt"]["point"] == {"x": center["x"], "y": center["y"]}, click
+assert click["receipt"]["posted"] is armed, click
+PY
+
+if [[ "$ARMED" == true ]]; then
+    echo "[v5.3] Armed single-shot completed. Native dummy log:"
+    cat "$DUMMY_LOG" || true
+else
+    echo "[v5.3] Dry-run single-shot completed."
+fi
+
+echo "========================================================================"
+echo "Genesis v5.3 manual gate complete"
+echo "========================================================================"

@@ -51,9 +51,13 @@ func jsonLine(_ payload: [String: Any]) {
 func targetPayload(config: Config, event: String) -> [String: Any] {
     let globalTargetX = config.windowX + config.targetX
     let globalTargetY = config.windowY + config.targetY
+    let centerX = globalTargetX + config.targetWidth / 2.0
+    let centerY = globalTargetY + config.targetHeight / 2.0
+    let screenHeight = NSScreen.main?.frame.height ?? 0.0
     return [
         "event": event,
         "target_id": "native-heal",
+        "screen_logical_height": screenHeight,
         "window": [
             "x": config.windowX,
             "y": config.windowY,
@@ -67,8 +71,12 @@ func targetPayload(config: Config, event: String) -> [String: Any] {
             "height": config.targetHeight,
         ],
         "target_global_logical_center": [
-            "x": globalTargetX + config.targetWidth / 2.0,
-            "y": globalTargetY + config.targetHeight / 2.0,
+            "x": centerX,
+            "y": centerY,
+        ],
+        "target_quartz_logical_center": [
+            "x": centerX,
+            "y": screenHeight > 0.0 ? screenHeight - centerY : centerY,
         ],
     ]
 }
