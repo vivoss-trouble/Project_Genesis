@@ -1,4 +1,6 @@
-use genesis_os_driver::{DriverReceipt, LogicalPoint, ScrollDelta, ScrollUnit, default_driver};
+use genesis_os_driver::{
+    DriverReceipt, KeyInput, LogicalPoint, ScrollDelta, ScrollUnit, default_driver,
+};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -61,9 +63,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let receipt = driver.click_left(options.point, options.armed)?;
             print_json(&receipt);
         }
+        "key" => {
+            let options = KeyOptions::parse(&rest)?;
+            if options.armed {
+                require_armed_confirmation(options.confirm.as_deref())?;
+            }
+            let receipt = driver.key_press(options.key, options.armed)?;
+            print_json(&receipt);
+        }
         _ => {
             return Err(format!(
-                "unknown command '{command}'. Use probe, selftest, daemon, move, click, or scroll"
+                "unknown command '{command}'. Use probe, selftest, daemon, move, click, scroll, or key"
             )
             .into());
         }
@@ -111,6 +121,43 @@ impl Options {
                 x: x.ok_or("missing --x")?,
                 y: y.ok_or("missing --y")?,
             },
+            armed,
+            confirm,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct KeyOptions {
+    key: KeyInput,
+    armed: bool,
+    confirm: Option<String>,
+}
+
+impl KeyOptions {
+    fn parse(args: &[String]) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut key = None;
+        let mut armed = false;
+        let mut confirm = None;
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--key" => {
+                    index += 1;
+                    key = Some(parse_key_input(&parse_string(args, index, "--key")?)?);
+                }
+                "--confirm" => {
+                    index += 1;
+                    confirm = Some(parse_string(args, index, "--confirm")?);
+                }
+                "--armed" => armed = true,
+                flag => return Err(format!("unknown key option '{flag}'").into()),
+            }
+            index += 1;
+        }
+
+        Ok(Self {
+            key: key.ok_or("missing --key")?,
             armed,
             confirm,
         })
@@ -197,6 +244,7 @@ struct DriverRequest {
     dx: Option<f64>,
     dy: Option<f64>,
     scroll_unit: Option<String>,
+    key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -312,6 +360,11 @@ fn handle_line(
                 .scroll_wheel(viewport.map(point), delta, armed)
                 .map_err(|error| error.to_string())
         }),
+        "key" | "key_press" => request.key_input().and_then(|key| {
+            driver
+                .key_press(key, armed)
+                .map_err(|error| error.to_string())
+        }),
         other => Err(format!("unsupported os-driver act: {other}")),
     };
 
@@ -363,6 +416,10 @@ impl DriverRequest {
             unit: parse_scroll_unit(self.scroll_unit.as_deref())?,
         })
     }
+
+    fn key_input(&self) -> Result<KeyInput, String> {
+        parse_key_input(self.key.as_deref().ok_or("missing key")?)
+    }
 }
 
 fn parse_scroll_unit(value: Option<&str>) -> Result<ScrollUnit, String> {
@@ -371,6 +428,22 @@ fn parse_scroll_unit(value: Option<&str>) -> Result<ScrollUnit, String> {
         "line" | "lines" => Ok(ScrollUnit::Line),
         other => Err(format!("unsupported scroll_unit: {other}")),
     }
+}
+
+fn parse_key_input(value: &str) -> Result<KeyInput, String> {
+    let normalized = value.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    let (key, key_code) = match normalized.as_str() {
+        "space" | "spacebar" => ("space", 49),
+        "page_down" | "pagedown" => ("page_down", 121),
+        "page_up" | "pageup" => ("page_up", 116),
+        "arrow_down" | "down" | "down_arrow" => ("arrow_down", 125),
+        "arrow_up" | "up" | "up_arrow" => ("arrow_up", 126),
+        other => return Err(format!("unsupported key: {other}")),
+    };
+    Ok(KeyInput {
+        key: key.to_string(),
+        key_code,
+    })
 }
 
 fn write_json_line<T: Serialize>(writer: &mut UnixStream, value: &T) -> Result<(), String> {

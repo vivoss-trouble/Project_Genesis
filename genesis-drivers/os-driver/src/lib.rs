@@ -22,6 +22,12 @@ pub struct ScrollDelta {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct KeyInput {
+    pub key: String,
+    pub key_code: u16,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct DisplayGeometry {
     pub display_id: u32,
     pub logical_origin_x: f64,
@@ -48,6 +54,7 @@ pub struct DriverReceipt {
     pub action: &'static str,
     pub point: LogicalPoint,
     pub scroll_delta: Option<ScrollDelta>,
+    pub key: Option<KeyInput>,
     pub cursor_position: Option<LogicalPoint>,
     pub armed: bool,
     pub posted: bool,
@@ -85,6 +92,7 @@ pub trait GenesisPhysicalDriver {
         delta: ScrollDelta,
         armed: bool,
     ) -> Result<DriverReceipt, DriverError>;
+    fn key_press(&self, key: KeyInput, armed: bool) -> Result<DriverReceipt, DriverError>;
 }
 
 pub fn default_driver() -> Box<dyn GenesisPhysicalDriver> {
@@ -122,7 +130,7 @@ fn validate_scroll_delta(delta: ScrollDelta) -> Result<(), DriverError> {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::{
-        DisplayGeometry, DriverError, DriverProbe, DriverReceipt, GenesisPhysicalDriver,
+        DisplayGeometry, DriverError, DriverProbe, DriverReceipt, GenesisPhysicalDriver, KeyInput,
         LogicalPoint, ScrollDelta, validate_point, validate_scroll_delta,
     };
     use std::ffi::c_void;
@@ -182,6 +190,11 @@ mod platform {
             wheel_count: u32,
             wheel1: i32,
             ...
+        ) -> CGEventRef;
+        fn CGEventCreateKeyboardEvent(
+            source: CGEventSourceRef,
+            virtual_key: u16,
+            key_down: u8,
         ) -> CGEventRef;
         fn CGEventPost(tap: u32, event: CGEventRef);
         fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
@@ -257,6 +270,20 @@ mod platform {
                 armed,
             ))
         }
+
+        fn key_press(&self, key: KeyInput, armed: bool) -> Result<DriverReceipt, DriverError> {
+            if armed {
+                require_accessibility()?;
+                post_key_event(key.key_code, true)?;
+                post_key_event(key.key_code, false)?;
+            }
+            Ok(receipt_with_key(
+                "key_press",
+                current_point(),
+                Some(key),
+                armed,
+            ))
+        }
     }
 
     fn accessibility_trusted() -> bool {
@@ -274,7 +301,7 @@ mod platform {
     }
 
     fn receipt(action: &'static str, point: LogicalPoint, armed: bool) -> DriverReceipt {
-        receipt_with_delta(action, point, None, armed)
+        receipt_with_key_delta(action, point, None, None, armed)
     }
 
     fn receipt_with_delta(
@@ -283,16 +310,40 @@ mod platform {
         scroll_delta: Option<ScrollDelta>,
         armed: bool,
     ) -> DriverReceipt {
+        receipt_with_key_delta(action, point, None, scroll_delta, armed)
+    }
+
+    fn receipt_with_key(
+        action: &'static str,
+        point: LogicalPoint,
+        key: Option<KeyInput>,
+        armed: bool,
+    ) -> DriverReceipt {
+        receipt_with_key_delta(action, point, key, None, armed)
+    }
+
+    fn receipt_with_key_delta(
+        action: &'static str,
+        point: LogicalPoint,
+        key: Option<KeyInput>,
+        scroll_delta: Option<ScrollDelta>,
+        armed: bool,
+    ) -> DriverReceipt {
         DriverReceipt {
             backend: "macos-coregraphics",
             action,
             point,
             scroll_delta,
+            key,
             cursor_position: current_mouse_location(),
             armed,
             posted: armed,
             accessibility_trusted: accessibility_trusted(),
         }
+    }
+
+    fn current_point() -> LogicalPoint {
+        current_mouse_location().unwrap_or(LogicalPoint { x: 0.0, y: 0.0 })
     }
 
     fn current_mouse_location() -> Option<LogicalPoint> {
@@ -376,6 +427,22 @@ mod platform {
         value.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32
     }
 
+    fn post_key_event(key_code: u16, key_down: bool) -> Result<(), DriverError> {
+        let event = unsafe {
+            CGEventCreateKeyboardEvent(ptr::null_mut(), key_code, if key_down { 1 } else { 0 })
+        };
+        if event.is_null() {
+            return Err(DriverError::Native(
+                "CGEventCreateKeyboardEvent returned null".to_string(),
+            ));
+        }
+        unsafe {
+            CGEventPost(K_CG_HID_EVENT_TAP, event);
+            CFRelease(event.cast_const());
+        }
+        Ok(())
+    }
+
     fn post_click_event(mouse_type: u32, point: LogicalPoint) -> Result<(), DriverError> {
         let event = unsafe {
             CGEventCreateMouseEvent(
@@ -449,8 +516,8 @@ mod platform {
 #[cfg(not(target_os = "macos"))]
 mod platform {
     use super::{
-        DriverError, DriverProbe, DriverReceipt, GenesisPhysicalDriver, LogicalPoint, ScrollDelta,
-        validate_point, validate_scroll_delta,
+        DriverError, DriverProbe, DriverReceipt, GenesisPhysicalDriver, KeyInput, LogicalPoint,
+        ScrollDelta, validate_point, validate_scroll_delta,
     };
 
     pub fn default_driver() -> Box<dyn GenesisPhysicalDriver> {
@@ -499,6 +566,12 @@ mod platform {
         ) -> Result<DriverReceipt, DriverError> {
             validate_point(point)?;
             validate_scroll_delta(delta)?;
+            Err(DriverError::UnsupportedPlatform(
+                "genesis-os-driver currently implements physical input only on macOS",
+            ))
+        }
+
+        fn key_press(&self, _key: KeyInput, _armed: bool) -> Result<DriverReceipt, DriverError> {
             Err(DriverError::UnsupportedPlatform(
                 "genesis-os-driver currently implements physical input only on macOS",
             ))
