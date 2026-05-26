@@ -56,7 +56,7 @@ The frame state may include a `marker_detection` object when the controlled
 Native Dummy marker is visible and Screen Recording permission is granted. This
 is a deterministic color-threshold detector for the `native-heal-marker` only:
 
-- threshold: `G >= 220`, `R <= 45`, `B <= 45`
+- threshold: `R >= 220`, `G <= 45`, `B >= 220`
 - output pixel center in physical capture coordinates
 - output CoreGraphics logical center for `genesis-os-driver`
 - output AppKit logical center for audit comparison

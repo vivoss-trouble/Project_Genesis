@@ -61,7 +61,7 @@ func targetPayload(config: Config, event: String) -> [String: Any] {
         "event": event,
         "target_id": "native-heal",
         "marker_id": "native-heal-marker",
-        "marker_rgb": ["r": 0, "g": 255, "b": 0],
+        "marker_rgb": ["r": 255, "g": 0, "b": 255],
         "screen_logical_height": screenHeight,
         "window": [
             "x": config.windowX,
@@ -207,7 +207,7 @@ final class DummyView: NSView {
         let marker = markerRect()
         NSColor.black.setFill()
         marker.insetBy(dx: -2, dy: -2).fill()
-        NSColor(calibratedRed: 0.0, green: 1.0, blue: 0.0, alpha: 1.0).setFill()
+        NSColor(calibratedRed: 1.0, green: 0.0, blue: 1.0, alpha: 1.0).setFill()
         marker.fill()
 
         let titleAttrs: [NSAttributedString.Key: Any] = [
@@ -300,7 +300,7 @@ let window = NSWindow(
 )
 window.title = "Genesis Native Dummy"
 window.isReleasedWhenClosed = false
-window.level = .floating
+window.level = .statusBar
 window.acceptsMouseMovedEvents = true
 let dummyView = DummyView(config: config)
 window.contentView = dummyView

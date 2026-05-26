@@ -38,7 +38,7 @@ assert window == {"height": 260, "width": 420, "x": 160, "y": 160}, payload
 assert target == {"height": 70, "width": 120, "x": 150, "y": 95}, payload
 assert center == {"x": 370, "y": 290}, payload
 assert payload["marker_id"] == "native-heal-marker", payload
-assert payload["marker_rgb"] == {"r": 0, "g": 255, "b": 0}, payload
+assert payload["marker_rgb"] == {"r": 255, "g": 0, "b": 255}, payload
 assert marker_center == center, payload
 assert screen_height > 0, payload
 assert quartz_center == {"x": 370, "y": screen_height - 290}, payload

@@ -124,6 +124,24 @@ struct MarkerDetection {
     threshold: MarkerThreshold,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct MarkerSample {
+    coregraphics_logical_point: LogicalPoint,
+    pixel_point: PixelPoint,
+    raw_bytes: Vec<u8>,
+    candidates: Vec<ColorCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ColorCandidate {
+    order: &'static str,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+    marker_match: bool,
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 struct PixelPoint {
     x: f64,
@@ -132,9 +150,9 @@ struct PixelPoint {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 struct MarkerThreshold {
-    min_green: u8,
-    max_red: u8,
-    max_blue: u8,
+    min_red: u8,
+    max_green: u8,
+    min_blue: u8,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,6 +174,7 @@ struct FrameState {
     bits_per_pixel: Option<usize>,
     capture_latency_ms: f64,
     marker_detection: Option<MarkerDetection>,
+    marker_sample: Option<MarkerSample>,
     error: Option<String>,
 }
 
@@ -362,6 +381,7 @@ fn capture_frame_state(frame_id: u64) -> FrameState {
         bits_per_pixel: None,
         capture_latency_ms: 0.0,
         marker_detection: None,
+        marker_sample: None,
         error: Some("genesis-frame-grabber currently supports macOS only".to_string()),
     }
 }
@@ -423,9 +443,9 @@ fn detect_marker_from_bgra_like_buffer(
     bytes_per_row: usize,
 ) -> Option<RawMarkerDetection> {
     const THRESHOLD: MarkerThreshold = MarkerThreshold {
-        min_green: 220,
-        max_red: 45,
-        max_blue: 45,
+        min_red: 220,
+        max_green: 45,
+        min_blue: 220,
     };
 
     if width == 0 || height == 0 || bytes_per_row < width.saturating_mul(4) {
@@ -469,25 +489,92 @@ fn detect_marker_from_bgra_like_buffer(
 }
 
 fn is_marker_pixel(pixel: &[u8], threshold: &MarkerThreshold) -> bool {
-    let candidates = [
-        (pixel[0], pixel[1], pixel[2], pixel[3]), // RGBA
-        (pixel[2], pixel[1], pixel[0], pixel[3]), // BGRA
-        (pixel[1], pixel[2], pixel[3], pixel[0]), // ARGB
-        (pixel[3], pixel[2], pixel[1], pixel[0]), // ABGR
+    color_candidates(pixel, threshold)
+        .iter()
+        .any(|candidate| candidate.marker_match)
+}
+
+fn color_candidates(pixel: &[u8], threshold: &MarkerThreshold) -> Vec<ColorCandidate> {
+    let raw_candidates = [
+        ("RGBA", pixel[0], pixel[1], pixel[2], pixel[3]),
+        ("BGRA", pixel[2], pixel[1], pixel[0], pixel[3]),
+        ("ARGB", pixel[1], pixel[2], pixel[3], pixel[0]),
+        ("ABGR", pixel[3], pixel[2], pixel[1], pixel[0]),
     ];
-    candidates.iter().any(|(r, g, b, a)| {
-        *a >= 128
-            && *g >= threshold.min_green
-            && *r <= threshold.max_red
-            && *b <= threshold.max_blue
+    raw_candidates
+        .into_iter()
+        .map(|(order, r, g, b, a)| ColorCandidate {
+            order,
+            r,
+            g,
+            b,
+            a,
+            marker_match: a >= 128
+                && r >= threshold.min_red
+                && g <= threshold.max_green
+                && b >= threshold.min_blue,
+        })
+        .collect()
+}
+
+fn sample_pixel_from_bgra_like_buffer(
+    bytes: &[u8],
+    width: usize,
+    height: usize,
+    bytes_per_row: usize,
+    pixel_x: usize,
+    pixel_y: usize,
+    logical_point: LogicalPoint,
+) -> Option<MarkerSample> {
+    const THRESHOLD: MarkerThreshold = MarkerThreshold {
+        min_red: 220,
+        max_green: 45,
+        min_blue: 220,
+    };
+
+    if pixel_x >= width || pixel_y >= height || bytes_per_row < width.saturating_mul(4) {
+        return None;
+    }
+    let offset = pixel_y
+        .saturating_mul(bytes_per_row)
+        .saturating_add(pixel_x.saturating_mul(4));
+    if offset + 4 > bytes.len() {
+        return None;
+    }
+    let pixel = &bytes[offset..offset + 4];
+    Some(MarkerSample {
+        coregraphics_logical_point: logical_point,
+        pixel_point: PixelPoint {
+            x: pixel_x as f64 + 0.5,
+            y: pixel_y as f64 + 0.5,
+        },
+        raw_bytes: pixel.to_vec(),
+        candidates: color_candidates(pixel, &THRESHOLD),
     })
+}
+
+fn expected_marker_sample_point() -> Option<LogicalPoint> {
+    let x = std::env::var("GENESIS_VISION_SAMPLE_X")
+        .ok()?
+        .parse::<f64>()
+        .ok()?;
+    let y = std::env::var("GENESIS_VISION_SAMPLE_Y")
+        .ok()?
+        .parse::<f64>()
+        .ok()?;
+    if x.is_finite() && y.is_finite() {
+        Some(LogicalPoint { x, y })
+    } else {
+        None
+    }
 }
 
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{
-        FrameState, Instant, LogicalBounds, LogicalPoint, MarkerDetection, PixelSize, current_ts,
-        detect_marker_from_bgra_like_buffer,
+        FrameState, Instant, LogicalBounds, LogicalPoint, MarkerDetection, MarkerSample, PixelSize,
+        current_ts, detect_marker_from_bgra_like_buffer, expected_marker_sample_point,
+        sample_pixel_from_bgra_like_buffer,
     };
     use std::ffi::c_void;
 
@@ -580,6 +667,7 @@ mod macos {
                 bits_per_pixel: None,
                 capture_latency_ms,
                 marker_detection: None,
+                marker_sample: None,
                 error: Some(
                     "CGDisplayCreateImage returned null; Screen Recording permission may be required"
                         .to_string(),
@@ -591,7 +679,7 @@ mod macos {
         let height = unsafe { CGImageGetHeight(image) };
         let bytes_per_row = unsafe { CGImageGetBytesPerRow(image) };
         let bits_per_pixel = unsafe { CGImageGetBitsPerPixel(image) };
-        let marker_detection = detect_marker(
+        let (marker_detection, marker_sample) = analyze_marker(
             image,
             width,
             height,
@@ -626,6 +714,7 @@ mod macos {
             bits_per_pixel: Some(bits_per_pixel),
             capture_latency_ms,
             marker_detection,
+            marker_sample,
             error: None,
         }
     }
@@ -638,7 +727,7 @@ mod macos {
         }
     }
 
-    fn detect_marker(
+    fn analyze_marker(
         image: CGImageRef,
         width: usize,
         height: usize,
@@ -647,18 +736,18 @@ mod macos {
         scale_x: Option<f64>,
         scale_y: Option<f64>,
         logical_height: f64,
-    ) -> Option<MarkerDetection> {
+    ) -> (Option<MarkerDetection>, Option<MarkerSample>) {
         if bits_per_pixel != 32 {
-            return None;
+            return (None, None);
         }
 
         let provider = unsafe { CGImageGetDataProvider(image) };
         if provider.is_null() {
-            return None;
+            return (None, None);
         }
         let data = unsafe { CGDataProviderCopyData(provider) };
         if data.is_null() {
-            return None;
+            return (None, None);
         }
 
         let bytes = unsafe {
@@ -666,39 +755,63 @@ mod macos {
             let len = CFDataGetLength(data);
             if ptr.is_null() || len <= 0 {
                 CFRelease(data.cast_const());
-                return None;
+                return (None, None);
             }
             std::slice::from_raw_parts(ptr, len as usize)
         };
 
         let marker = detect_marker_from_bgra_like_buffer(bytes, width, height, bytes_per_row);
+        let marker_sample = expected_marker_sample_point().and_then(|point| {
+            let scale_x = scale_x?;
+            let scale_y = scale_y?;
+            if scale_x <= 0.0 || scale_y <= 0.0 {
+                return None;
+            }
+            let pixel_x = (point.x * scale_x).round().max(0.0) as usize;
+            let pixel_y = (point.y * scale_y).round().max(0.0) as usize;
+            sample_pixel_from_bgra_like_buffer(
+                bytes,
+                width,
+                height,
+                bytes_per_row,
+                pixel_x,
+                pixel_y,
+                point,
+            )
+        });
         unsafe {
             CFRelease(data.cast_const());
         }
 
-        let marker = marker?;
-        let scale_x = scale_x?;
-        let scale_y = scale_y?;
+        let Some(marker) = marker else {
+            return (None, marker_sample);
+        };
+        let (Some(scale_x), Some(scale_y)) = (scale_x, scale_y) else {
+            return (None, marker_sample);
+        };
         if scale_x <= 0.0 || scale_y <= 0.0 {
-            return None;
+            return (None, marker_sample);
         }
 
         let coregraphics_x = marker.pixel_center.x / scale_x;
         let coregraphics_y = marker.pixel_center.y / scale_y;
-        Some(MarkerDetection {
-            marker_id: "native-heal-marker",
-            pixel_center: marker.pixel_center,
-            coregraphics_logical_center: LogicalPoint {
-                x: coregraphics_x,
-                y: coregraphics_y,
-            },
-            appkit_logical_center: LogicalPoint {
-                x: coregraphics_x,
-                y: logical_height - coregraphics_y,
-            },
-            pixel_count: marker.pixel_count,
-            threshold: marker.threshold,
-        })
+        (
+            Some(MarkerDetection {
+                marker_id: "native-heal-marker",
+                pixel_center: marker.pixel_center,
+                coregraphics_logical_center: LogicalPoint {
+                    x: coregraphics_x,
+                    y: coregraphics_y,
+                },
+                appkit_logical_center: LogicalPoint {
+                    x: coregraphics_x,
+                    y: logical_height - coregraphics_y,
+                },
+                pixel_count: marker.pixel_count,
+                threshold: marker.threshold,
+            }),
+            marker_sample,
+        )
     }
 }
 
@@ -707,7 +820,7 @@ mod tests {
     use super::detect_marker_from_bgra_like_buffer;
 
     #[test]
-    fn marker_detector_finds_pure_green_bgra_cluster() {
+    fn marker_detector_finds_pure_magenta_bgra_cluster() {
         let width = 16usize;
         let height = 12usize;
         let bytes_per_row = width * 4;
@@ -716,9 +829,9 @@ mod tests {
         for y in 4..8 {
             for x in 6..10 {
                 let offset = y * bytes_per_row + x * 4;
-                bytes[offset] = 0; // B
-                bytes[offset + 1] = 255; // G
-                bytes[offset + 2] = 0; // R
+                bytes[offset] = 255; // B
+                bytes[offset + 1] = 0; // G
+                bytes[offset + 2] = 255; // R
                 bytes[offset + 3] = 255; // A
             }
         }
