@@ -15,6 +15,7 @@ AUTO_FIRE_TOKEN="GENESIS_V58_AUTO_FIRE_NATIVE_DUMMY"
 FIRE_TOKEN="FIRE"
 VISION_HZ="${GENESIS_V58_VISION_HZ:-10}"
 TARGET_ID="${GENESIS_V58_TARGET_ID:-native-heal-b}"
+SELECTION_POLICY="${GENESIS_V58_SELECTION_POLICY:-explicit_target_id}"
 MARKER_WAIT_SEC="${GENESIS_V58_MARKER_WAIT_SEC:-8}"
 POST_CLICK_SETTLE_SEC="${GENESIS_V58_POST_CLICK_SETTLE_SEC:-0.7}"
 DUMMY_PID=""
@@ -45,9 +46,10 @@ wait_for_socket() {
 }
 
 echo "========================================================================"
-echo "Genesis v5.8 Fire-at-ID Tactical Gate"
+echo "Genesis v5.8/v5.9 Fire-at-ID Tactical Gate"
 echo "========================================================================"
-echo "[v5.8] Target ID: $TARGET_ID"
+echo "[v5.8] Requested Target ID: $TARGET_ID"
+echo "[v5.9] Selection Policy: $SELECTION_POLICY"
 
 swiftc scripts/native_dummy_window.swift -o "$DUMMY_BIN"
 "$DUMMY_BIN" --selftest
@@ -152,7 +154,7 @@ elif [[ "$ARMED" == true ]]; then
     fi
 fi
 
-python3 - "$VISION_SOCKET" "$OS_SOCKET" "$ARMED" "$MARKER_WAIT_SEC" "$READY_JSON" "$TARGET_ID" <<'PY'
+python3 - "$VISION_SOCKET" "$OS_SOCKET" "$ARMED" "$MARKER_WAIT_SEC" "$READY_JSON" "$TARGET_ID" "$SELECTION_POLICY" <<'PY'
 import json
 import math
 import socket
@@ -165,6 +167,7 @@ armed = sys.argv[3] == "true"
 marker_wait_sec = float(sys.argv[4])
 ready = json.loads(sys.argv[5])
 target_id = sys.argv[6]
+selection_policy = sys.argv[7]
 
 
 def roundtrip(socket_path, payload):
@@ -259,7 +262,34 @@ print(json.dumps({
     "unmapped_candidate_count": max(0, len(candidates) - len(target_set)),
 }, sort_keys=True))
 
-selected = next((item for item in target_set if item["target_id"] == target_id), None)
+def select_target(target_set, policy, requested_target_id):
+    if policy == "explicit_target_id":
+        return next((item for item in target_set if item["target_id"] == requested_target_id), None)
+    if policy == "leftmost":
+        return min(target_set, key=lambda item: (item["global_coregraphics_point"]["x"], item["target_id"]))
+    if policy == "rightmost":
+        return max(target_set, key=lambda item: (item["global_coregraphics_point"]["x"], item["target_id"]))
+    if policy == "nearest_to_window_center":
+        frame = ready["window_frame"]
+        top_y = window_top_y()
+        center = {
+            "x": frame["x"] + frame["width"] / 2.0,
+            "y": top_y + frame["height"] / 2.0,
+        }
+        return min(
+            target_set,
+            key=lambda item: (
+                math.hypot(
+                    item["global_coregraphics_point"]["x"] - center["x"],
+                    item["global_coregraphics_point"]["y"] - center["y"],
+                ),
+                item["target_id"],
+            ),
+        )
+    raise SystemExit(f"[v5.9] unsupported selection policy: {policy}")
+
+
+selected = select_target(target_set, selection_policy, target_id)
 if selected is None:
     raise SystemExit(f"[v5.8] target_id not found in mapped target set: {target_id}")
 if selected["candidate_distance_px"] > 8.0:
@@ -269,15 +299,18 @@ if selected["candidate_distance_px"] > 8.0:
 
 print(json.dumps({
     "event": "selection_policy",
-    "policy": "explicit_target_id",
+    "policy": selection_policy,
     "requested_target_id": target_id,
     "selected": selected,
 }, sort_keys=True))
 
 point = selected["global_coregraphics_point"]
+selected_target_id = selected["target_id"]
 print(json.dumps({
     "event": "vision_action_point",
-    "target_id": target_id,
+    "requested_target_id": target_id,
+    "selected_target_id": selected_target_id,
+    "target_id": selected_target_id,
     "candidate_id": selected["candidate_id"],
     "coregraphics_logical_point": point,
 }, sort_keys=True))
@@ -291,7 +324,7 @@ move = roundtrip(
     os_socket,
     {
         "request_id": "move-v58-fire-at-id",
-        "action_id": f"act-v58-{target_id}-move",
+        "action_id": f"act-v58-{selected_target_id}-move",
         "act": "move_mouse",
         "x": point["x"],
         "y": point["y"],
@@ -307,7 +340,7 @@ click = roundtrip(
     os_socket,
     {
         "request_id": "click-v58-fire-at-id",
-        "action_id": f"act-v58-{target_id}",
+        "action_id": f"act-v58-{selected_target_id}",
         "act": "click_point",
         "x": point["x"],
         "y": point["y"],
