@@ -297,6 +297,35 @@ PY
     POST_LOG="$OUTPUT_DIR/variant_${VARIANT_INDEX}_post.log"
     VARIANT_RESULT="$(analyze_variant "$VARIANT_INDEX" "$KEY_NAME" "$PRE_LOG" "$POST_LOG" "$KEY_JSON" "$BASE_URL" "$POST_URL")"
     emit "$VARIANT_RESULT"
+
+    if [[ "$ARMED" == true ]]; then
+        ABORT_JSON="$(python3 - "$VARIANT_RESULT" <<'PY'
+import json
+import sys
+
+variant = json.loads(sys.argv[1])
+if not variant.get("url_changed"):
+    raise SystemExit(0)
+
+print(json.dumps({
+    "event": "v97_keyboard_scroll_abort",
+    "stop_reason": "url_changed_after_key",
+    "variant_index": variant.get("variant_index"),
+    "requested_key": variant.get("requested_key"),
+    "base_url": variant.get("base_url"),
+    "post_url": variant.get("post_url"),
+    "key_posted": variant.get("key_posted"),
+    "target_signature_changed": variant.get("target_signature_changed"),
+}, sort_keys=True))
+PY
+)"
+        if [[ -n "$ABORT_JSON" ]]; then
+            emit "$ABORT_JSON"
+            echo "[v9.7] ERROR: armed keyboard probe changed URL after $KEY_NAME; fail-fast stop engaged" >&2
+            exit 2
+        fi
+    fi
+
     VARIANT_INDEX=$((VARIANT_INDEX + 1))
 done
 
