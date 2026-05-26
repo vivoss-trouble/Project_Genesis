@@ -9,6 +9,7 @@ DUMMY_BIN="${GENESIS_V53_DUMMY_BIN:-/tmp/genesis_native_dummy_window}"
 DUMMY_LOG="${GENESIS_V53_DUMMY_LOG:-/tmp/genesis_native_dummy_window.log}"
 DRIVER_LOG="${GENESIS_V53_DRIVER_LOG:-/tmp/genesis_os_driver_v53.log}"
 ARMED_TOKEN="GENESIS_V53_ARMED_NATIVE_DUMMY"
+FIRE_TOKEN="FIRE"
 DRIVER_PID=""
 DUMMY_PID=""
 
@@ -64,6 +65,15 @@ fi
 DRIVER_PID=$!
 wait_for_socket
 
+if [[ "$ARMED" == true && "${GENESIS_V53_FIRE_CONFIRM:-}" != "$FIRE_TOKEN" ]]; then
+    echo "[v5.3] Native dummy is open. Type FIRE and press Enter to post the single click."
+    read -r FIRE_INPUT
+    if [[ "$FIRE_INPUT" != "$FIRE_TOKEN" ]]; then
+        echo "[v5.3] Fire confirmation was not FIRE; refusing armed click."
+        exit 1
+    fi
+fi
+
 python3 - "$SOCKET_PATH" "$TARGET_JSON" "$ARMED" <<'PY'
 import json
 import socket
@@ -89,7 +99,10 @@ def roundtrip(payload):
 probe = roundtrip({"request_id": "probe-v53", "act": "probe"})
 print(json.dumps({"event": "os_driver_probe", "probe": probe}, sort_keys=True))
 if armed and not probe.get("probe", {}).get("accessibility_trusted"):
-    raise SystemExit("[v5.3] Accessibility is not trusted; refusing armed click")
+    raise SystemExit(
+        "[v5.3] Accessibility is not trusted; refusing armed click. "
+        "Grant Accessibility to the terminal/Codex host, then rerun."
+    )
 
 click = roundtrip(
     {
