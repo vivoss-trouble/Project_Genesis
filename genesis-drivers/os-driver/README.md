@@ -44,7 +44,9 @@ GENESIS_OS_VIEWPORT_X=320 GENESIS_OS_VIEWPORT_Y=180 \
 
 For the example above, a request with `x=100,y=100` is posted as global
 `x=420,y=280`. The response includes both the `viewport_offset` and the mapped
-receipt point.
+receipt point. Receipts also include `cursor_position`, sampled from
+CoreGraphics after the driver action, so armed calibration can distinguish a
+failed OS cursor move from a higher-level AppKit coordinate mismatch.
 
 The daemon is dry-run unless started with both `--armed` and the confirmation
 token:

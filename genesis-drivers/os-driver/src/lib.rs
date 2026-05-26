@@ -33,6 +33,7 @@ pub struct DriverReceipt {
     pub backend: &'static str,
     pub action: &'static str,
     pub point: LogicalPoint,
+    pub cursor_position: Option<LogicalPoint>,
     pub armed: bool,
     pub posted: bool,
     pub accessibility_trusted: bool,
@@ -130,6 +131,8 @@ mod platform {
         fn CGDisplayBounds(display: u32) -> CGRect;
         fn CGDisplayPixelsHigh(display: u32) -> usize;
         fn CGDisplayPixelsWide(display: u32) -> usize;
+        fn CGEventCreate(source: CGEventSourceRef) -> CGEventRef;
+        fn CGEventGetLocation(event: CGEventRef) -> CGPoint;
         fn CGEventCreateMouseEvent(
             source: CGEventSourceRef,
             mouse_type: u32,
@@ -208,10 +211,26 @@ mod platform {
             backend: "macos-coregraphics",
             action,
             point,
+            cursor_position: current_mouse_location(),
             armed,
             posted: armed,
             accessibility_trusted: accessibility_trusted(),
         }
+    }
+
+    fn current_mouse_location() -> Option<LogicalPoint> {
+        let event = unsafe { CGEventCreate(ptr::null_mut()) };
+        if event.is_null() {
+            return None;
+        }
+        let point = unsafe { CGEventGetLocation(event) };
+        unsafe {
+            CFRelease(event.cast_const());
+        }
+        Some(LogicalPoint {
+            x: point.x,
+            y: point.y,
+        })
     }
 
     fn post_mouse_event(mouse_type: u32, point: LogicalPoint) -> Result<(), DriverError> {
