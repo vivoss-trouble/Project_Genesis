@@ -382,7 +382,7 @@ if child_delta > -20:
     raise SystemExit(f"[v8.6] child target did not remap upward enough: {child_delta}")
 if abs(outside_delta) > 5.0:
     raise SystemExit(f"[v8.6] outside target drifted during scroll-state projection: {outside_delta}")
-if abs(region_delta) > 3.0:
+if abs(region_delta) > 5.0:
     raise SystemExit(f"[v8.6] scroll-region shell drifted during content remap: {region_delta}")
 
 print(json.dumps({

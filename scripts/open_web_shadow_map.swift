@@ -127,6 +127,9 @@ func pixelKind(r: UInt8, g: UInt8, b: UInt8, a: UInt8) -> String? {
     if red >= 235 && green >= 185 && green <= 245 && blue <= 190 {
         return "scroll-region"
     }
+    if red <= 65 && green >= 150 && green <= 220 && blue >= 130 && blue <= 210 {
+        return "sticky-like"
+    }
     if red >= 90 && red <= 160 && green <= 95 && blue >= 150 {
         return "heading"
     }
@@ -279,6 +282,11 @@ func postProcess(_ raw: [RawComponent], width: Int, height: Int) -> [RawComponen
                 && component.bbox.width >= 90
                 && component.bbox.height >= 34
                 && widthRatio <= 0.45
+        case "sticky-like":
+            return component.pixelCount >= 2_000
+                && component.bbox.width >= 120
+                && component.bbox.height >= 34
+                && widthRatio <= 0.60
         case "dark-pixel":
             return component.pixelCount >= 4_000
                 && component.bbox.width >= 240
@@ -358,6 +366,7 @@ func drawDebugOverlay(image: CGImage, components: [RawComponent], path: String) 
         case "button-like": color = .systemGreen
         case "code-block": color = .systemRed
         case "scroll-region": color = .systemOrange
+        case "sticky-like": color = .systemTeal
         default: color = .systemPink
         }
         color.setStroke()
@@ -437,26 +446,37 @@ func attachScrollTopology(to targets: [[String: Any]]) -> (targets: [[String: An
     for scrollTarget in scrollTargets {
         guard let scrollId = scrollTarget["target_id"] as? String else { continue }
         let scrollRect = rectFromTarget(scrollTarget)
-        let childIds = targets.compactMap { target -> String? in
+        var childIds: [String] = []
+        var stickyIds: [String] = []
+        for target in targets {
             guard
                 let targetId = target["target_id"] as? String,
                 targetId != scrollId,
                 (target["control_kind"] as? String) != "scroll-region"
             else {
-                return nil
+                continue
             }
             let center = centerFromTarget(target)
-            guard scrollRect.contains(center) else { return nil }
-            return targetId
+            guard scrollRect.contains(center) else { continue }
+            if (target["control_kind"] as? String) == "sticky-like" {
+                stickyIds.append(targetId)
+            } else {
+                childIds.append(targetId)
+            }
         }
 
         for childId in childIds {
             containerByTargetId[childId] = scrollId
         }
+        for stickyId in stickyIds {
+            containerByTargetId[stickyId] = scrollId
+        }
 
         var region = scrollTarget
         region["child_target_ids"] = childIds.sorted()
         region["child_count"] = childIds.count
+        region["sticky_target_ids"] = stickyIds.sorted()
+        region["sticky_count"] = stickyIds.count
         scrollRegions.append(region)
     }
 
@@ -464,6 +484,11 @@ func attachScrollTopology(to targets: [[String: Any]]) -> (targets: [[String: An
         guard let targetId = enrichedTargets[index]["target_id"] as? String else { continue }
         if let containerId = containerByTargetId[targetId] {
             enrichedTargets[index]["container_id"] = containerId
+            if (enrichedTargets[index]["control_kind"] as? String) == "sticky-like" {
+                enrichedTargets[index]["motion_role"] = "sticky_occluder"
+            } else {
+                enrichedTargets[index]["motion_role"] = "scroll_child"
+            }
         }
     }
 
@@ -558,7 +583,7 @@ do {
         "targets": targets,
         "scroll_regions": topology.scrollRegions,
         "debug_overlay": debugPath,
-        "taxonomy_version": "v8.5-shadow-taxonomy",
+        "taxonomy_version": "v8.7-shadow-taxonomy",
         "posted": false,
         "os_driver_active": false,
     ])

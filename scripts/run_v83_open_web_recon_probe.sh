@@ -60,7 +60,7 @@ if not frames:
 if summary.get("posted") is not False or summary.get("os_driver_active") is not False:
     raise SystemExit(f"[v8.3] recon must remain read-only: {summary}")
 
-taxonomy = ["heading", "link-like", "button-like", "code-block", "scroll-region"]
+taxonomy = ["heading", "link-like", "button-like", "code-block", "scroll-region", "sticky-like"]
 kind_counts = {kind: 0 for kind in taxonomy}
 for target in frames[-1].get("targets") or []:
     kind = target.get("control_kind")

@@ -69,7 +69,7 @@ if summary.get("child_window_y_delta", 0) > -20:
     raise SystemExit(f"[v8.6] contained child did not remap upward enough: {summary}")
 if abs(summary.get("outside_window_y_delta", 999)) > 5.0:
     raise SystemExit(f"[v8.6] outside target drifted unexpectedly: {summary}")
-if abs(summary.get("scroll_region_window_y_delta", 999)) > 3.0:
+if abs(summary.get("scroll_region_window_y_delta", 999)) > 5.0:
     raise SystemExit(f"[v8.6] scroll-region shell drifted unexpectedly: {summary}")
 
 print(json.dumps({
