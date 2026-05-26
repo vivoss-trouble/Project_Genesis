@@ -110,7 +110,7 @@
     }
   </style>
 </head>
-<body>
+<body class="scrolled">
   <main>
     <h1>Genesis v7.1 Browser Fixture</h1>
     <section class="grid" aria-label="control topology">
@@ -126,11 +126,6 @@
     </section>
   </main>
   <script>
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("state") === "scrolled") {
-      document.body.classList.add("scrolled");
-    }
-
     window.setTimeout(() => {
       document.getElementById("async-target").classList.add("visible");
     }, 350);
