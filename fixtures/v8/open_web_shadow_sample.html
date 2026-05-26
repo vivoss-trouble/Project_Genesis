@@ -104,6 +104,14 @@
       margin: 0 0 18px;
     }
 
+    .scroll-content {
+      transform: translateY(0);
+    }
+
+    body.scrolled .scroll-content {
+      transform: translateY(-40px);
+    }
+
     .nested-link {
       display: inline-block;
       color: #1d4ed8;
@@ -131,21 +139,28 @@
     assert!(os_driver_active == false);
 }</pre>
     <section class="scroll-region" id="shadow-target" aria-label="scrollable reference">
-      <h2>Scrollable Reference</h2>
-      <p>
-        A real web page is not a calculator grid. Genesis must first learn to
-        name the physical regions in a browser window without mutating the page.
-      </p>
-      <p>
-        This scroll container gives the mapper a spatial extension boundary
-        while keeping the redline deterministic and side-effect free.
-      </p>
-      <a class="nested-link" href="#nested-contract">Nested scroll contract</a>
-      <p>
-        The v8.1 contract is observation only: capture, classify, project, and
-        write telemetry. No click, no scroll, no keyboard input.
-      </p>
+      <div class="scroll-content">
+        <h2>Scrollable Reference</h2>
+        <p>
+          A real web page is not a calculator grid. Genesis must first learn to
+          name the physical regions in a browser window without mutating the page.
+        </p>
+        <p>
+          This scroll container gives the mapper a spatial extension boundary
+          while keeping the redline deterministic and side-effect free.
+        </p>
+        <a class="nested-link" href="#nested-contract">Nested scroll contract</a>
+        <p>
+          The v8.1 contract is observation only: capture, classify, project, and
+          write telemetry. No click, no scroll, no keyboard input.
+        </p>
+      </div>
     </section>
   </main>
+  <script>
+    if (new URLSearchParams(window.location.search).get("state") === "scrolled") {
+      document.body.classList.add("scrolled");
+    }
+  </script>
 </body>
 </html>
