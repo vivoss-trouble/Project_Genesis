@@ -101,6 +101,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "genesis-frame-grabber"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "genesis-os-driver"
 version = "0.1.0"
 dependencies = [

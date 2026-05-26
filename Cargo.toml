@@ -11,7 +11,8 @@ members = [
     "genesis-plugins/brain-llm",
     "genesis-daemons/llm-dummy",
     "genesis-daemons/fantasy-dummy",
-    "genesis-drivers/os-driver"
+    "genesis-drivers/os-driver",
+    "genesis-drivers/frame-grabber"
 ]
 
 [workspace.package]
