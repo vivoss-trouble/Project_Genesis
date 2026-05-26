@@ -11,7 +11,7 @@ struct Config {
     var targetY: Double = 95
     var targetWidth: Double = 120
     var targetHeight: Double = 70
-    var markerSize: Double = 12
+    var markerSize: Double = 28
 }
 
 func parseConfig() -> Config {
@@ -300,7 +300,7 @@ let window = NSWindow(
 )
 window.title = "Genesis Native Dummy"
 window.isReleasedWhenClosed = false
-window.level = .statusBar
+window.level = .floating
 window.acceptsMouseMovedEvents = true
 let dummyView = DummyView(config: config)
 window.contentView = dummyView

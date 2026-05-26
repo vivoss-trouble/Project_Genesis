@@ -12,6 +12,7 @@ VISION_LOG="${GENESIS_V55_VISION_LOG:-/tmp/genesis_vision_daemon_v55.log}"
 DRIVER_LOG="${GENESIS_V55_DRIVER_LOG:-/tmp/genesis_os_driver_v55.log}"
 ARMED_TOKEN="GENESIS_V55_ARMED_VISION_MARKER"
 FIRE_TOKEN="FIRE"
+VISIBLE_TOKEN="VISIBLE"
 VISION_HZ="${GENESIS_V55_VISION_HZ:-10}"
 MARKER_WAIT_SEC="${GENESIS_V55_MARKER_WAIT_SEC:-8}"
 POST_CLICK_SETTLE_SEC="${GENESIS_V55_POST_CLICK_SETTLE_SEC:-0.7}"
@@ -83,6 +84,16 @@ done
 if [[ -z "$READY_JSON" ]]; then
     echo "[v5.5] ERROR: native dummy did not report ready geometry"
     exit 1
+fi
+
+if [[ "${GENESIS_V55_VISIBLE_CONFIRM:-}" != "$VISIBLE_TOKEN" ]]; then
+    echo "[v5.5] Move/uncover the Native Dummy so the magenta marker is visible."
+    echo "[v5.5] Type VISIBLE and press Enter to start vision capture."
+    read -r VISIBLE_INPUT
+    if [[ "$VISIBLE_INPUT" != "$VISIBLE_TOKEN" ]]; then
+        echo "[v5.5] Visibility confirmation was not VISIBLE; refusing vision capture."
+        exit 1
+    fi
 fi
 
 SAMPLE_XY="$(python3 - "$READY_JSON" <<'PY'
