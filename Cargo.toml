@@ -10,7 +10,8 @@ members = [
     "genesis-plugins/anchor-mmap",
     "genesis-plugins/brain-llm",
     "genesis-daemons/llm-dummy",
-    "genesis-daemons/fantasy-dummy"
+    "genesis-daemons/fantasy-dummy",
+    "genesis-drivers/os-driver"
 ]
 
 [workspace.package]
