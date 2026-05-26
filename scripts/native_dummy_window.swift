@@ -128,6 +128,10 @@ final class DummyView: NSView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         NSColor(calibratedWhite: 0.08, alpha: 1.0).setFill()
         bounds.fill()
