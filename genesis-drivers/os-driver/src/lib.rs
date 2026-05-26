@@ -97,6 +97,7 @@ mod platform {
     const K_CG_EVENT_LEFT_MOUSE_UP: u32 = 2;
     const K_CG_EVENT_MOUSE_MOVED: u32 = 5;
     const K_CG_MOUSE_BUTTON_LEFT: u32 = 0;
+    const K_CG_MOUSE_EVENT_CLICK_STATE: u32 = 1;
 
     #[repr(C)]
     #[derive(Debug, Clone, Copy)]
@@ -136,6 +137,8 @@ mod platform {
             mouse_button: u32,
         ) -> CGEventRef;
         fn CGEventPost(tap: u32, event: CGEventRef);
+        fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
+        fn CGWarpMouseCursorPosition(new_cursor_position: CGPoint) -> i32;
         fn CGMainDisplayID() -> u32;
     }
 
@@ -163,6 +166,7 @@ mod platform {
             validate_point(point)?;
             if armed {
                 require_accessibility()?;
+                warp_mouse(point)?;
                 post_mouse_event(K_CG_EVENT_MOUSE_MOVED, point)?;
             }
             Ok(receipt("move_mouse", point, armed))
@@ -176,8 +180,10 @@ mod platform {
             validate_point(point)?;
             if armed {
                 require_accessibility()?;
-                post_mouse_event(K_CG_EVENT_LEFT_MOUSE_DOWN, point)?;
-                post_mouse_event(K_CG_EVENT_LEFT_MOUSE_UP, point)?;
+                warp_mouse(point)?;
+                post_mouse_event(K_CG_EVENT_MOUSE_MOVED, point)?;
+                post_click_event(K_CG_EVENT_LEFT_MOUSE_DOWN, point)?;
+                post_click_event(K_CG_EVENT_LEFT_MOUSE_UP, point)?;
             }
             Ok(receipt("click_left", point, armed))
         }
@@ -230,6 +236,47 @@ mod platform {
             CFRelease(event.cast_const());
         }
         Ok(())
+    }
+
+    fn post_click_event(mouse_type: u32, point: LogicalPoint) -> Result<(), DriverError> {
+        let event = unsafe {
+            CGEventCreateMouseEvent(
+                ptr::null_mut(),
+                mouse_type,
+                CGPoint {
+                    x: point.x,
+                    y: point.y,
+                },
+                K_CG_MOUSE_BUTTON_LEFT,
+            )
+        };
+        if event.is_null() {
+            return Err(DriverError::Native(
+                "CGEventCreateMouseEvent returned null".to_string(),
+            ));
+        }
+        unsafe {
+            CGEventSetIntegerValueField(event, K_CG_MOUSE_EVENT_CLICK_STATE, 1);
+            CGEventPost(K_CG_HID_EVENT_TAP, event);
+            CFRelease(event.cast_const());
+        }
+        Ok(())
+    }
+
+    fn warp_mouse(point: LogicalPoint) -> Result<(), DriverError> {
+        let result = unsafe {
+            CGWarpMouseCursorPosition(CGPoint {
+                x: point.x,
+                y: point.y,
+            })
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(DriverError::Native(format!(
+                "CGWarpMouseCursorPosition failed with status {result}"
+            )))
+        }
     }
 
     fn main_display_geometry() -> DisplayGeometry {
