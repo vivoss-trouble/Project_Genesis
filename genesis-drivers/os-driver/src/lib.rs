@@ -7,6 +7,12 @@ pub struct LogicalPoint {
     pub y: f64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct ScrollDelta {
+    pub dx: f64,
+    pub dy: f64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct DisplayGeometry {
     pub display_id: u32,
@@ -33,6 +39,7 @@ pub struct DriverReceipt {
     pub backend: &'static str,
     pub action: &'static str,
     pub point: LogicalPoint,
+    pub scroll_delta: Option<ScrollDelta>,
     pub cursor_position: Option<LogicalPoint>,
     pub armed: bool,
     pub posted: bool,
@@ -64,6 +71,12 @@ pub trait GenesisPhysicalDriver {
     fn probe(&self) -> DriverProbe;
     fn move_mouse(&self, point: LogicalPoint, armed: bool) -> Result<DriverReceipt, DriverError>;
     fn click_left(&self, point: LogicalPoint, armed: bool) -> Result<DriverReceipt, DriverError>;
+    fn scroll_wheel(
+        &self,
+        point: LogicalPoint,
+        delta: ScrollDelta,
+        armed: bool,
+    ) -> Result<DriverReceipt, DriverError>;
 }
 
 pub fn default_driver() -> Box<dyn GenesisPhysicalDriver> {
@@ -84,11 +97,25 @@ fn validate_point(point: LogicalPoint) -> Result<(), DriverError> {
     Ok(())
 }
 
+fn validate_scroll_delta(delta: ScrollDelta) -> Result<(), DriverError> {
+    if !delta.dx.is_finite() || !delta.dy.is_finite() {
+        return Err(DriverError::InvalidCoordinate(
+            "physical driver scroll deltas must be finite".to_string(),
+        ));
+    }
+    if delta.dx.abs() > 10_000.0 || delta.dy.abs() > 10_000.0 {
+        return Err(DriverError::InvalidCoordinate(
+            "physical driver scroll delta exceeds absolute safety limit".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 mod platform {
     use super::{
         DisplayGeometry, DriverError, DriverProbe, DriverReceipt, GenesisPhysicalDriver,
-        LogicalPoint, validate_point,
+        LogicalPoint, ScrollDelta, validate_point, validate_scroll_delta,
     };
     use std::ffi::c_void;
     use std::ptr;
@@ -99,6 +126,7 @@ mod platform {
     const K_CG_EVENT_MOUSE_MOVED: u32 = 5;
     const K_CG_MOUSE_BUTTON_LEFT: u32 = 0;
     const K_CG_MOUSE_EVENT_CLICK_STATE: u32 = 1;
+    const K_CG_SCROLL_EVENT_UNIT_PIXEL: u32 = 0;
 
     #[repr(C)]
     #[derive(Debug, Clone, Copy)]
@@ -138,6 +166,13 @@ mod platform {
             mouse_type: u32,
             mouse_cursor_position: CGPoint,
             mouse_button: u32,
+        ) -> CGEventRef;
+        fn CGEventCreateScrollWheelEvent(
+            source: CGEventSourceRef,
+            units: u32,
+            wheel_count: u32,
+            wheel1: i32,
+            ...
         ) -> CGEventRef;
         fn CGEventPost(tap: u32, event: CGEventRef);
         fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
@@ -190,6 +225,28 @@ mod platform {
             }
             Ok(receipt("click_left", point, armed))
         }
+
+        fn scroll_wheel(
+            &self,
+            point: LogicalPoint,
+            delta: ScrollDelta,
+            armed: bool,
+        ) -> Result<DriverReceipt, DriverError> {
+            validate_point(point)?;
+            validate_scroll_delta(delta)?;
+            if armed {
+                require_accessibility()?;
+                warp_mouse(point)?;
+                post_mouse_event(K_CG_EVENT_MOUSE_MOVED, point)?;
+                post_scroll_event(delta)?;
+            }
+            Ok(receipt_with_delta(
+                "scroll_wheel",
+                point,
+                Some(delta),
+                armed,
+            ))
+        }
     }
 
     fn accessibility_trusted() -> bool {
@@ -207,10 +264,20 @@ mod platform {
     }
 
     fn receipt(action: &'static str, point: LogicalPoint, armed: bool) -> DriverReceipt {
+        receipt_with_delta(action, point, None, armed)
+    }
+
+    fn receipt_with_delta(
+        action: &'static str,
+        point: LogicalPoint,
+        scroll_delta: Option<ScrollDelta>,
+        armed: bool,
+    ) -> DriverReceipt {
         DriverReceipt {
             backend: "macos-coregraphics",
             action,
             point,
+            scroll_delta,
             cursor_position: current_mouse_location(),
             armed,
             posted: armed,
@@ -255,6 +322,34 @@ mod platform {
             CFRelease(event.cast_const());
         }
         Ok(())
+    }
+
+    fn post_scroll_event(delta: ScrollDelta) -> Result<(), DriverError> {
+        let wheel_y = clamp_scroll_value(delta.dy);
+        let wheel_x = clamp_scroll_value(delta.dx);
+        let event = unsafe {
+            CGEventCreateScrollWheelEvent(
+                ptr::null_mut(),
+                K_CG_SCROLL_EVENT_UNIT_PIXEL,
+                2,
+                wheel_y,
+                wheel_x,
+            )
+        };
+        if event.is_null() {
+            return Err(DriverError::Native(
+                "CGEventCreateScrollWheelEvent returned null".to_string(),
+            ));
+        }
+        unsafe {
+            CGEventPost(K_CG_HID_EVENT_TAP, event);
+            CFRelease(event.cast_const());
+        }
+        Ok(())
+    }
+
+    fn clamp_scroll_value(value: f64) -> i32 {
+        value.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32
     }
 
     fn post_click_event(mouse_type: u32, point: LogicalPoint) -> Result<(), DriverError> {
@@ -330,8 +425,8 @@ mod platform {
 #[cfg(not(target_os = "macos"))]
 mod platform {
     use super::{
-        DriverError, DriverProbe, DriverReceipt, GenesisPhysicalDriver, LogicalPoint,
-        validate_point,
+        DriverError, DriverProbe, DriverReceipt, GenesisPhysicalDriver, LogicalPoint, ScrollDelta,
+        validate_point, validate_scroll_delta,
     };
 
     pub fn default_driver() -> Box<dyn GenesisPhysicalDriver> {
@@ -367,6 +462,19 @@ mod platform {
             _armed: bool,
         ) -> Result<DriverReceipt, DriverError> {
             validate_point(point)?;
+            Err(DriverError::UnsupportedPlatform(
+                "genesis-os-driver currently implements physical input only on macOS",
+            ))
+        }
+
+        fn scroll_wheel(
+            &self,
+            point: LogicalPoint,
+            delta: ScrollDelta,
+            _armed: bool,
+        ) -> Result<DriverReceipt, DriverError> {
+            validate_point(point)?;
+            validate_scroll_delta(delta)?;
             Err(DriverError::UnsupportedPlatform(
                 "genesis-os-driver currently implements physical input only on macOS",
             ))

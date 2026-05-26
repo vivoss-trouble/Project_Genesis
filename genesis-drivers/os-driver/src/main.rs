@@ -1,4 +1,4 @@
-use genesis_os_driver::{DriverReceipt, LogicalPoint, default_driver};
+use genesis_os_driver::{DriverReceipt, LogicalPoint, ScrollDelta, default_driver};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -63,7 +63,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(format!(
-                "unknown command '{command}'. Use probe, selftest, daemon, move, or click"
+                "unknown command '{command}'. Use probe, selftest, daemon, move, click, or scroll"
             )
             .into());
         }
@@ -194,6 +194,8 @@ struct DriverRequest {
     act: String,
     x: Option<f64>,
     y: Option<f64>,
+    dx: Option<f64>,
+    dy: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -303,6 +305,12 @@ fn handle_line(
                 .click_left(viewport.map(point), armed)
                 .map_err(|error| error.to_string())
         }),
+        "scroll" | "scroll_wheel" => request.point().and_then(|point| {
+            let delta = request.scroll_delta()?;
+            driver
+                .scroll_wheel(viewport.map(point), delta, armed)
+                .map_err(|error| error.to_string())
+        }),
         other => Err(format!("unsupported os-driver act: {other}")),
     };
 
@@ -344,6 +352,13 @@ impl DriverRequest {
         Ok(LogicalPoint {
             x: self.x.ok_or("missing x")?,
             y: self.y.ok_or("missing y")?,
+        })
+    }
+
+    fn scroll_delta(&self) -> Result<ScrollDelta, String> {
+        Ok(ScrollDelta {
+            dx: self.dx.unwrap_or(0.0),
+            dy: self.dy.ok_or("missing dy")?,
         })
     }
 }
