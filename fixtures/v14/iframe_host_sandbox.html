@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Genesis v14.0 Sandbox Iframe Fixture</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      background: #10141c;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 900px;
+      background:
+        linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px) 0 0 / 64px 64px,
+        linear-gradient(0deg, rgba(255,255,255,0.04) 1px, transparent 1px) 0 0 / 64px 64px,
+        #10141c;
+      color: #f5f7fb;
+    }
+
+    main {
+      width: min(920px, calc(100vw - 48px));
+      margin: 58px auto;
+      padding: 28px;
+      background: #171d28;
+      border: 1px solid #3a4558;
+    }
+
+    h1 {
+      margin: 0 0 18px;
+      font-size: 24px;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+
+    .target-zone {
+      position: relative;
+      height: 360px;
+      border: 1px dashed #6b7890;
+      display: grid;
+      place-items: center;
+      background: #121824;
+    }
+
+    .next-chapter {
+      min-width: 220px;
+      min-height: 74px;
+      border: 0;
+      border-radius: 0;
+      background: #22c55e;
+      color: #08130c;
+      font-size: 22px;
+      font-weight: 900;
+      letter-spacing: 0;
+    }
+
+    .iframe-scrim {
+      position: fixed;
+      inset: 0;
+      border: 0;
+      width: 100vw;
+      height: 100vh;
+      background: transparent;
+    }
+  </style>
+</head>
+<body>
+  <main aria-label="Genesis v14 sandbox iframe test field">
+    <h1>Genesis v14.0 Sandbox Iframe Fixture</h1>
+    <section class="target-zone" aria-label="blocked target zone">
+      <button id="next-chapter" class="next-chapter" aria-label="Next chapter">Next chapter</button>
+    </section>
+  </main>
+
+  <iframe
+    id="obstacle-frame"
+    class="iframe-scrim"
+    title="Genesis sandbox iframe obstacle"
+    sandbox=""
+    src="./iframe_content_sandbox.html"></iframe>
+</body>
+</html>

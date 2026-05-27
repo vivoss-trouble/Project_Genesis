@@ -266,6 +266,7 @@ let targetPoint = targetFrame.map {
 
 let containerRoles = Set(["AXGroup", "AXOpaqueProviderGroup", "AXScrollArea", "AXWebArea", "AXDialog"])
 let modalNeedles = ["modal", "dialog", "cookie", "newsletter"]
+let iframeNeedles = ["iframe obstacle", "iframe visual obstacle"]
 func isOccluderLike(_ item: QueueItem) -> Bool {
     let role = stringAttribute(item.element, kAXRoleAttribute)
     let subrole = stringAttribute(item.element, kAXSubroleAttribute)
@@ -276,19 +277,38 @@ func isOccluderLike(_ item: QueueItem) -> Bool {
     return modalNeedles.contains { text.contains($0) }
 }
 
+func isIframeOccluderLike(_ item: QueueItem) -> Bool {
+    let role = stringAttribute(item.element, kAXRoleAttribute)
+    let text = haystack(item.element).lowercased()
+    return (role == "AXWebArea" || role == "AXGroup")
+        && iframeNeedles.contains { text.contains($0) }
+}
+
 let targetContainingContainers = allItems.filter { item in
     let role = stringAttribute(item.element, kAXRoleAttribute)
     guard containerRoles.contains(role) else { return false }
     return containsPoint(rectAttribute(item.element, "AXFrame"), targetPoint)
 }
+let targetContainingContainerPayloads = targetContainingContainers.map {
+    elementPayload($0.element, depth: $0.depth, path: $0.path)
+}
 
-let occluderItem = targetContainingContainers
+let modalOccluderItem = targetContainingContainers
     .filter(isOccluderLike)
     .min { lhs, rhs in
         let lhsArea = rectAttribute(lhs.element, "AXFrame")?["area"] ?? Double.greatestFiniteMagnitude
         let rhsArea = rectAttribute(rhs.element, "AXFrame")?["area"] ?? Double.greatestFiniteMagnitude
         return lhsArea < rhsArea
     }
+let iframeOccluderItem = targetContainingContainers
+    .filter(isIframeOccluderLike)
+    .min { lhs, rhs in
+        let lhsArea = rectAttribute(lhs.element, "AXFrame")?["area"] ?? Double.greatestFiniteMagnitude
+        let rhsArea = rectAttribute(rhs.element, "AXFrame")?["area"] ?? Double.greatestFiniteMagnitude
+        return lhsArea < rhsArea
+    }
+let occluderItem = modalOccluderItem ?? iframeOccluderItem
+let occluderKind = modalOccluderItem != nil ? "modal" : (iframeOccluderItem != nil ? "iframe" : "none")
 let occluderFrame = occluderItem.flatMap { rectAttribute($0.element, "AXFrame") }
 let occlusionClear = targetItem != nil && occluderItem == nil
 
@@ -335,6 +355,12 @@ let clearancePoint = selectedFrame.map {
     ["x": $0["center_x"] ?? 0, "y": $0["center_y"] ?? 0]
 }
 let rejectedCount = candidatePayloads.filter { ($0["legal_candidate"] as? Bool) != true }.count
+let stopReason: String
+if selectedClearance == nil && !occlusionClear {
+    stopReason = occluderKind == "iframe" ? "iframe_occluder_unresolved" : "obstacle_unresolved"
+} else {
+    stopReason = "candidate_resolved"
+}
 
 emit([
     "event": "v130_obstacle_clearance_probe",
@@ -350,8 +376,11 @@ emit([
     "target_point": jsonValue(targetPoint),
     "occlusion_clear": occlusionClear,
     "occluder_found": occluderItem != nil,
+    "occluder_kind": occluderKind,
     "occluder": occluderItem.map { elementPayload($0.element, depth: $0.depth, path: $0.path) } ?? [:],
     "occluder_frame": jsonValue(occluderFrame),
+    "target_containing_container_count": targetContainingContainers.count,
+    "target_containing_containers": targetContainingContainerPayloads,
     "candidate_count": candidatePayloads.count,
     "legal_candidate_count": legalItems.count,
     "rejected_candidate_count": rejectedCount,
@@ -359,7 +388,7 @@ emit([
     "selected_clearance": selectedClearance.map { elementPayload($0.element, depth: $0.depth, path: $0.path) } ?? [:],
     "clearance_point": jsonValue(clearancePoint),
     "clearance_resolved": selectedClearance != nil,
-    "stop_reason": selectedClearance == nil && !occlusionClear ? "obstacle_unresolved" : "candidate_resolved",
+    "stop_reason": stopReason,
     "whitelist": Array(whitelist).sorted(),
     "blacklist": blacklist,
     "role_whitelist": Array(roleWhitelist).sorted(),

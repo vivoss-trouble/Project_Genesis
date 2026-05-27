@@ -9,7 +9,7 @@ DRIVER_LOG="${GENESIS_V130_DRIVER_LOG:-/tmp/genesis_os_driver_v130.log}"
 OUTPUT_DIR="${GENESIS_V130_OUTPUT_DIR:-/tmp/genesis_v130_obstacle_clearance_probe}"
 AX_BIN="${GENESIS_V130_AX_BIN:-$OUTPUT_DIR/ax_obstacle_clearance_probe}"
 RESULTS_LOG="$OUTPUT_DIR/results.jsonl"
-FIXTURE_PATH="$ROOT_DIR/fixtures/v13/obstacle_clearance_fixture.html"
+FIXTURE_PATH="${GENESIS_V130_FIXTURE_PATH:-$ROOT_DIR/fixtures/v13/obstacle_clearance_fixture.html}"
 FIXTURE_URL="$(python3 - "$FIXTURE_PATH" <<'PY'
 from pathlib import Path
 import sys
@@ -85,6 +85,10 @@ PY
 
 open_fixture_url() {
     local url="$1"
+    if [[ "$url" == file://* ]]; then
+        open -a "$BROWSER_APP" "$url" || open "$url"
+        return
+    fi
     if [[ "$BROWSER_APP" == "Safari" || "$BROWSER_APP" == "Safari浏览器" ]]; then
         osascript - "$url" >/dev/null <<'OSA'
 on run argv
