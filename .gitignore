@@ -13,6 +13,7 @@ __pycache__/
 # Runtime state and generated replay artifacts
 /.genesis-state/
 /.genesis-state-replay/
+/evidence_packs/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
