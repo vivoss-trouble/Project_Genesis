@@ -155,6 +155,7 @@ print(json.dumps({
     "dialog_candidate_count": int(last.get("dialog_candidate_count") or 0),
     "candidate_count": int(last.get("candidate_count") or 0),
     "legal_candidate_count": int(last.get("legal_candidate_count") or 0),
+    "rejected_candidate_count": int(last.get("rejected_candidate_count") or 0),
     "safe_to_arm": False,
     "modal_inactive_on_load": modal_inactive,
     "recon_notes": (

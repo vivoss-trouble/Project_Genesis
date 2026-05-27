@@ -10,9 +10,21 @@ let triggerNeedle = (env["GENESIS_V145A2_TRIGGER_TITLE"] ?? "Add Delivery Addres
 let dialogNeedles = (env["GENESIS_V145A2_DIALOG_NEEDLES"] ?? "Add Delivery Address,Verification Result,Address Added,End of the Road")
     .split(separator: ",")
     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+let whitelist = Set((env["GENESIS_V145A2_WHITELIST"] ?? "cancel,close,dismiss,not now,reject all,decline")
+    .split(separator: ",")
+    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
+let blacklist = (env["GENESIS_V145A2_BLACKLIST"] ?? "accept,subscribe,continue,agree,add,submit,save")
+    .split(separator: ",")
+    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+let roleWhitelist = Set((env["GENESIS_V145A2_ROLE_WHITELIST"] ?? "AXButton,AXLink")
+    .split(separator: ",")
+    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) })
 let maxDepth = Int(env["GENESIS_V145A2_AX_MAX_DEPTH"] ?? "12") ?? 12
 let maxNodes = Int(env["GENESIS_V145A2_AX_MAX_NODES"] ?? "3200") ?? 3200
 let maxMatches = Int(env["GENESIS_V145A2_MAX_MATCHES"] ?? "20") ?? 20
+let triggerExecute = env["GENESIS_V145A2_TRIGGER_EXECUTE"] == "1"
+let triggerConfirm = env["GENESIS_V145A2_TRIGGER_CONFIRM"] ?? ""
+let triggerToken = "GENESIS_V145A2_TRIGGER_W3C_MODAL"
 
 func emit(_ payload: [String: Any]) {
     let data = try! JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
@@ -22,6 +34,28 @@ func emit(_ payload: [String: Any]) {
 
 func jsonValue(_ value: Any?) -> Any {
     value ?? NSNull()
+}
+
+func statusName(_ status: AXError) -> String {
+    switch status {
+    case .success: return "success"
+    case .failure: return "failure"
+    case .illegalArgument: return "illegal_argument"
+    case .invalidUIElement: return "invalid_ui_element"
+    case .invalidUIElementObserver: return "invalid_ui_element_observer"
+    case .cannotComplete: return "cannot_complete"
+    case .attributeUnsupported: return "attribute_unsupported"
+    case .actionUnsupported: return "action_unsupported"
+    case .notificationUnsupported: return "notification_unsupported"
+    case .notImplemented: return "not_implemented"
+    case .notificationAlreadyRegistered: return "notification_already_registered"
+    case .notificationNotRegistered: return "notification_not_registered"
+    case .apiDisabled: return "api_disabled"
+    case .noValue: return "no_value"
+    case .parameterizedAttributeUnsupported: return "parameterized_attribute_unsupported"
+    case .notEnoughPrecision: return "not_enough_precision"
+    @unknown default: return "unknown_\(status.rawValue)"
+    }
 }
 
 func copyAttribute(_ element: AXUIElement, _ attribute: String) -> (AXError, CFTypeRef?) {
@@ -102,6 +136,29 @@ func haystack(_ element: AXUIElement) -> String {
     ].joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
+func labelFields(_ element: AXUIElement) -> [String] {
+    [
+        stringAttribute(element, kAXTitleAttribute),
+        stringAttribute(element, kAXDescriptionAttribute),
+        stringAttribute(element, kAXValueAttribute),
+    ]
+    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+    .filter { !$0.isEmpty }
+}
+
+func isDescendantPath(_ path: [Int], of ancestor: [Int]) -> Bool {
+    guard path.count > ancestor.count else { return false }
+    return Array(path.prefix(ancestor.count)) == ancestor
+}
+
+func containsPoint(_ rect: [String: Double]?, _ point: [String: Double]?) -> Bool {
+    guard let rect, let point, let x = point["x"], let y = point["y"] else { return false }
+    return x >= (rect["x"] ?? 0)
+        && x <= (rect["x"] ?? 0) + (rect["width"] ?? 0)
+        && y >= (rect["y"] ?? 0)
+        && y <= (rect["y"] ?? 0) + (rect["height"] ?? 0)
+}
+
 func shouldDescend(role: String, depth: Int) -> Bool {
     guard depth < maxDepth else { return false }
     return [
@@ -179,12 +236,15 @@ guard let selectedWindow else {
 }
 
 var visited = 0
+var allItems: [QueueItem] = []
 var triggerMatches: [[String: Any]] = []
-var dialogMatches: [[String: Any]] = []
+var triggerElements: [AXUIElement] = []
+var dialogItems: [QueueItem] = []
 var queue = [QueueItem(element: selectedWindow, depth: 0, path: [])]
 
 while !queue.isEmpty && visited < maxNodes {
     let item = queue.removeFirst()
+    allItems.append(item)
     visited += 1
     let role = stringAttribute(item.element, kAXRoleAttribute)
     let subrole = stringAttribute(item.element, kAXSubroleAttribute)
@@ -196,13 +256,14 @@ while !queue.isEmpty && visited < maxNodes {
         && actions.contains("AXPress")
         && textLower.contains(triggerNeedle) {
         triggerMatches.append(elementPayload(item.element, depth: item.depth, path: item.path))
+        triggerElements.append(item.element)
     }
 
     let dialogLike = role == "AXDialog"
         || subrole == "AXApplicationDialog"
         || (role == "AXGroup" && dialogNeedles.contains { textLower.contains($0) } && actions.contains("AXCancel"))
-    if dialogMatches.count < maxMatches && dialogLike {
-        dialogMatches.append(elementPayload(item.element, depth: item.depth, path: item.path))
+    if dialogItems.count < maxMatches && dialogLike {
+        dialogItems.append(item)
     }
 
     guard shouldDescend(role: role, depth: item.depth) else { continue }
@@ -210,6 +271,69 @@ while !queue.isEmpty && visited < maxNodes {
         queue.append(QueueItem(element: child, depth: item.depth + 1, path: item.path + [index]))
     }
 }
+
+let selectedTrigger = triggerElements.count == 1 ? triggerElements[0] : nil
+let triggerMutationAuthorized = triggerExecute && triggerConfirm == triggerToken
+let axMutationAttempted = triggerMutationAuthorized && selectedTrigger != nil
+let triggerPressStatus: String
+if axMutationAttempted, let selectedTrigger {
+    let status = AXUIElementPerformAction(selectedTrigger, "AXPress" as CFString)
+    triggerPressStatus = statusName(status)
+} else if triggerExecute {
+    triggerPressStatus = triggerConfirm == triggerToken ? "not_attempted_no_unique_trigger" : "not_attempted_missing_confirm"
+} else {
+    triggerPressStatus = "not_attempted"
+}
+if axMutationAttempted {
+    usleep(250_000)
+}
+
+let dialogMatches = dialogItems.map { elementPayload($0.element, depth: $0.depth, path: $0.path) }
+let selectedDialog = dialogItems.min { lhs, rhs in
+    let lhsArea = rectAttribute(lhs.element, "AXFrame")?["area"] ?? Double.greatestFiniteMagnitude
+    let rhsArea = rectAttribute(rhs.element, "AXFrame")?["area"] ?? Double.greatestFiniteMagnitude
+    return lhsArea < rhsArea
+}
+let selectedDialogFrame = selectedDialog.flatMap { rectAttribute($0.element, "AXFrame") }
+var candidatePayloads: [[String: Any]] = []
+var legalCandidateCount = 0
+
+if let selectedDialog, let selectedDialogFrame {
+    for item in allItems {
+        let role = stringAttribute(item.element, kAXRoleAttribute)
+        guard roleWhitelist.contains(role) else { continue }
+        let fields = labelFields(item.element)
+        let label = haystack(item.element)
+        let labelLower = label.lowercased()
+        guard !labelLower.isEmpty else { continue }
+        let frame = rectAttribute(item.element, "AXFrame")
+        let center = frame.map { ["x": $0["center_x"] ?? 0, "y": $0["center_y"] ?? 0] }
+        let insideDialog = isDescendantPath(item.path, of: selectedDialog.path)
+            && containsPoint(selectedDialogFrame, center)
+        guard insideDialog else { continue }
+        let whitelistMatch = fields.contains { whitelist.contains($0) }
+        let blacklistMatches = blacklist.filter { !labelLower.isEmpty && labelLower.contains($0) }
+        let legal = whitelistMatch && blacklistMatches.isEmpty
+        if legal {
+            legalCandidateCount += 1
+        }
+        var payload = elementPayload(item.element, depth: item.depth, path: item.path)
+        payload["label"] = label
+        payload["label_fields"] = fields
+        payload["inside_occluder"] = insideDialog
+        payload["inside_occluder_tree"] = insideDialog
+        payload["role_allowed"] = true
+        payload["whitelist_match"] = whitelistMatch
+        payload["blacklist_matches"] = blacklistMatches
+        payload["legal_candidate"] = legal
+        candidatePayloads.append(payload)
+    }
+}
+let rejectedCandidateCount = candidatePayloads.filter { ($0["legal_candidate"] as? Bool) != true }.count
+let safeToArm = !dialogMatches.isEmpty
+    && legalCandidateCount == 1
+    && candidatePayloads.count >= 2
+    && rejectedCandidateCount >= 1
 
 emit([
     "event": "v145a2_w3c_modal_static_recon",
@@ -224,15 +348,22 @@ emit([
     "trigger_found": !triggerMatches.isEmpty,
     "trigger_candidate_count": triggerMatches.count,
     "trigger_candidates": triggerMatches,
+    "trigger_execute_requested": triggerExecute,
+    "trigger_mutation_authorized": triggerMutationAuthorized,
+    "trigger_press_status": triggerPressStatus,
     "public_obstacle_seen": !dialogMatches.isEmpty,
     "occluder_kind": dialogMatches.isEmpty ? "none" : "modal",
     "dialog_candidate_count": dialogMatches.count,
     "dialog_candidates": dialogMatches,
-    "candidate_count": 0,
-    "legal_candidate_count": 0,
-    "safe_to_arm": false,
+    "candidate_count": candidatePayloads.count,
+    "legal_candidate_count": legalCandidateCount,
+    "rejected_candidate_count": rejectedCandidateCount,
+    "candidates": candidatePayloads,
+    "safe_to_arm": safeToArm,
+    "whitelist": Array(whitelist).sorted(),
+    "blacklist": blacklist,
     "visited_count": visited,
     "posted": false,
     "physical_input_posted": false,
-    "ax_mutation_attempted": false,
+    "ax_mutation_attempted": axMutationAttempted,
 ])
