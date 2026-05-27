@@ -265,18 +265,25 @@ let targetPoint = targetFrame.map {
 }
 
 let containerRoles = Set(["AXGroup", "AXOpaqueProviderGroup", "AXScrollArea", "AXWebArea", "AXDialog"])
-let modalNeedles = ["modal", "dialog", "obstacle", "cookie", "newsletter"]
+let modalNeedles = ["modal", "dialog", "cookie", "newsletter"]
+func isOccluderLike(_ item: QueueItem) -> Bool {
+    let role = stringAttribute(item.element, kAXRoleAttribute)
+    let subrole = stringAttribute(item.element, kAXSubroleAttribute)
+    if role == "AXDialog" || subrole == "AXApplicationDialog" {
+        return true
+    }
+    let text = haystack(item.element).lowercased()
+    return modalNeedles.contains { text.contains($0) }
+}
+
 let targetContainingContainers = allItems.filter { item in
     let role = stringAttribute(item.element, kAXRoleAttribute)
     guard containerRoles.contains(role) else { return false }
     return containsPoint(rectAttribute(item.element, "AXFrame"), targetPoint)
 }
 
-let preferredContainers = targetContainingContainers.filter { item in
-    let text = haystack(item.element).lowercased()
-    return modalNeedles.contains { text.contains($0) }
-}
-let occluderItem = (preferredContainers.isEmpty ? targetContainingContainers : preferredContainers)
+let occluderItem = targetContainingContainers
+    .filter(isOccluderLike)
     .min { lhs, rhs in
         let lhsArea = rectAttribute(lhs.element, "AXFrame")?["area"] ?? Double.greatestFiniteMagnitude
         let rhsArea = rectAttribute(rhs.element, "AXFrame")?["area"] ?? Double.greatestFiniteMagnitude
