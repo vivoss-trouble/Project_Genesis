@@ -7,6 +7,14 @@ let bundleIdNeedle = env["GENESIS_V145A2_BROWSER_BUNDLE_ID"] ?? "com.apple.Safar
 let browserNameNeedle = (env["GENESIS_V145A2_BROWSER_APP"] ?? "Safari").lowercased()
 let titleNeedle = (env["GENESIS_V145A2_WINDOW_TITLE"] ?? "Modal Dialog Example").lowercased()
 let triggerNeedle = (env["GENESIS_V145A2_TRIGGER_TITLE"] ?? "Add Delivery Address").lowercased()
+let harmlessNeedle = (env["GENESIS_V145A2_HARMLESS_TITLE"] ?? "").lowercased()
+let harmlessRoles = Set((env["GENESIS_V145A2_HARMLESS_ROLES"] ?? "AXStaticText,AXHeading")
+    .split(separator: ",")
+    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+let harmlessForbiddenAncestorRoles = Set((env["GENESIS_V145A2_HARMLESS_FORBIDDEN_ANCESTOR_ROLES"] ?? "AXButton,AXLink,AXPopUpButton,AXMenuButton,AXTextField,AXTextArea")
+    .split(separator: ",")
+    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+let minHarmlessArea = Double(env["GENESIS_V145A2_MIN_HARMLESS_AREA"] ?? "600") ?? 600
 let dialogNeedles = (env["GENESIS_V145A2_DIALOG_NEEDLES"] ?? "Add Delivery Address,Verification Result,Address Added,End of the Road")
     .split(separator: ",")
     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
@@ -159,6 +167,11 @@ func containsPoint(_ rect: [String: Double]?, _ point: [String: Double]?) -> Boo
         && y <= (rect["y"] ?? 0) + (rect["height"] ?? 0)
 }
 
+func frameCenter(_ frame: [String: Double]?) -> [String: Double]? {
+    guard let frame else { return nil }
+    return ["x": frame["center_x"] ?? 0, "y": frame["center_y"] ?? 0]
+}
+
 func shouldDescend(role: String, depth: Int) -> Bool {
     guard depth < maxDepth else { return false }
     return [
@@ -240,6 +253,7 @@ var allItems: [QueueItem] = []
 var triggerMatches: [[String: Any]] = []
 var triggerElements: [AXUIElement] = []
 var dialogItems: [QueueItem] = []
+var webAreaItems: [QueueItem] = []
 var queue = [QueueItem(element: selectedWindow, depth: 0, path: [])]
 
 while !queue.isEmpty && visited < maxNodes {
@@ -251,6 +265,10 @@ while !queue.isEmpty && visited < maxNodes {
     let text = haystack(item.element)
     let textLower = text.lowercased()
     let actions = actionNames(item.element)
+
+    if role == "AXWebArea" {
+        webAreaItems.append(item)
+    }
 
     if triggerMatches.count < maxMatches
         && actions.contains("AXPress")
@@ -295,6 +313,54 @@ let selectedDialog = dialogItems.min { lhs, rhs in
     return lhsArea < rhsArea
 }
 let selectedDialogFrame = selectedDialog.flatMap { rectAttribute($0.element, "AXFrame") }
+let selectedWindowFrame = rectAttribute(selectedWindow, "AXFrame")
+
+var harmlessCandidates: [[String: Any]] = []
+for item in allItems {
+    let role = stringAttribute(item.element, kAXRoleAttribute)
+    guard harmlessRoles.contains(role) else { continue }
+    let insideWebArea = webAreaItems.contains { webArea in
+        isDescendantPath(item.path, of: webArea.path)
+    }
+    guard insideWebArea else { continue }
+    let hasInteractiveAncestor = allItems.contains { ancestor in
+        guard isDescendantPath(item.path, of: ancestor.path) else { return false }
+        let ancestorRole = stringAttribute(ancestor.element, kAXRoleAttribute)
+        return harmlessForbiddenAncestorRoles.contains(ancestorRole)
+    }
+    guard !hasInteractiveAncestor else { continue }
+    let actions = actionNames(item.element)
+    guard !actions.contains("AXPress") else { continue }
+    let label = haystack(item.element)
+    let labelLower = label.lowercased()
+    guard !labelLower.isEmpty else { continue }
+    if !harmlessNeedle.isEmpty && !labelLower.contains(harmlessNeedle) {
+        continue
+    }
+    let frame = rectAttribute(item.element, "AXFrame")
+    guard (frame?["area"] ?? 0) >= minHarmlessArea else { continue }
+    guard containsPoint(selectedWindowFrame, frameCenter(frame)) else { continue }
+    var payload = elementPayload(item.element, depth: item.depth, path: item.path)
+    payload["label"] = label
+    payload["harmless_candidate"] = true
+    payload["reason"] = "static_non_pressable"
+    harmlessCandidates.append(payload)
+}
+
+let selectedHarmless = harmlessCandidates.min { lhs, rhs in
+    let lhsFrame = lhs["frame"] as? [String: Double]
+    let rhsFrame = rhs["frame"] as? [String: Double]
+    let lhsY = lhsFrame?["center_y"] ?? Double.greatestFiniteMagnitude
+    let rhsY = rhsFrame?["center_y"] ?? Double.greatestFiniteMagnitude
+    if lhsY != rhsY {
+        return lhsY < rhsY
+    }
+    return (lhsFrame?["center_x"] ?? Double.greatestFiniteMagnitude) < (rhsFrame?["center_x"] ?? Double.greatestFiniteMagnitude)
+}
+let selectedHarmlessFrame = selectedHarmless?["frame"] as? [String: Double]
+let harmlessPoint = selectedHarmlessFrame.map {
+    ["x": $0["center_x"] ?? 0, "y": $0["center_y"] ?? 0]
+}
 var candidatePayloads: [[String: Any]] = []
 var legalCandidateCount = 0
 
@@ -353,6 +419,12 @@ emit([
     "trigger_found": !triggerMatches.isEmpty,
     "trigger_candidate_count": triggerMatches.count,
     "trigger_candidates": triggerMatches,
+    "harmless_title": harmlessNeedle,
+    "harmless_candidate_count": harmlessCandidates.count,
+    "harmless_candidates": harmlessCandidates.prefix(maxMatches).map { $0 },
+    "harmless_target_found": selectedHarmless != nil,
+    "selected_harmless_target": selectedHarmless ?? [:],
+    "harmless_point": jsonValue(harmlessPoint),
     "trigger_execute_requested": triggerExecute,
     "trigger_mutation_authorized": triggerMutationAuthorized,
     "trigger_press_status": triggerPressStatus,
