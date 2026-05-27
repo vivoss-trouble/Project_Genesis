@@ -15,6 +15,9 @@ let maxCandidates = Int(env["GENESIS_V103_MAX_CANDIDATES"] ?? "12") ?? 12
 let execute = env["GENESIS_V103_AX_EXECUTE"] == "1"
 let pointX = Double(env["GENESIS_V103_POINT_X"] ?? "")
 let pointY = Double(env["GENESIS_V103_POINT_Y"] ?? "")
+let requireVisibleTarget = env["GENESIS_V103_TARGET_REQUIRE_VISIBLE"] == "1"
+let preferVisibleTarget = env["GENESIS_V103_TARGET_PREFER_VISIBLE"] == "1"
+let tieBreaker = (env["GENESIS_V103_TARGET_TIE_BREAKER"] ?? "first").lowercased()
 
 func statusName(_ status: AXError) -> String {
     switch status {
@@ -71,6 +74,12 @@ func stringAttribute(_ element: AXUIElement, _ attribute: String) -> String {
     return string
 }
 
+func boolAttribute(_ element: AXUIElement, _ attribute: String) -> Bool {
+    let (status, value) = copyAttribute(element, attribute)
+    guard status == .success, let bool = value as? Bool else { return false }
+    return bool
+}
+
 func children(of element: AXUIElement) -> [AXUIElement] {
     let (status, value) = copyAttribute(element, kAXChildrenAttribute)
     guard status == .success, let items = value as? [AXUIElement] else { return [] }
@@ -120,6 +129,18 @@ func elementPayload(_ element: AXUIElement, depth: Int, path: [Int]) -> [String:
         "actions": actionNames(element),
         "child_count": children(of: element).count,
     ]
+}
+
+func rectsIntersect(_ lhs: [String: Double]?, _ rhs: [String: Double]?) -> Bool {
+    guard let lhs, let rhs else { return false }
+    let lhsMaxX = (lhs["x"] ?? 0) + (lhs["width"] ?? 0)
+    let lhsMaxY = (lhs["y"] ?? 0) + (lhs["height"] ?? 0)
+    let rhsMaxX = (rhs["x"] ?? 0) + (rhs["width"] ?? 0)
+    let rhsMaxY = (rhs["y"] ?? 0) + (rhs["height"] ?? 0)
+    return (lhs["x"] ?? 0) <= rhsMaxX
+        && lhsMaxX >= (rhs["x"] ?? 0)
+        && (lhs["y"] ?? 0) <= rhsMaxY
+        && lhsMaxY >= (rhs["y"] ?? 0)
 }
 
 func haystack(_ element: AXUIElement) -> String {
@@ -180,9 +201,12 @@ guard let app else {
 
 let appElement = AXUIElementCreateApplication(app.processIdentifier)
 let windowList = windows(of: appElement)
-let selectedWindow = windowList.first { window in
+let matchingWindows = windowList.filter { window in
     stringAttribute(window, kAXTitleAttribute).lowercased().contains(titleNeedle)
-} ?? windowList.first
+}
+let selectedWindow = matchingWindows.first { window in
+    boolAttribute(window, kAXMainAttribute) || boolAttribute(window, kAXFocusedAttribute)
+} ?? matchingWindows.first ?? windowList.first
 
 guard let selectedWindow else {
     emit([
@@ -263,7 +287,9 @@ if let webArea = locate.webArea, let x = pointX, let y = pointY {
 
 var visitedTargets = 0
 var candidates: [[String: Any]] = []
+var candidateItems: [QueueItem] = []
 var selectedTarget: QueueItem?
+let selectedWindowFrame = rectAttribute(selectedWindow, "AXFrame")
 
 if let webArea = locate.webArea {
     var queue = [QueueItem(element: webArea.element, depth: 0, path: [], ancestors: [])]
@@ -272,11 +298,12 @@ if let webArea = locate.webArea {
         visitedTargets += 1
         let role = stringAttribute(item.element, kAXRoleAttribute)
         if haystack(item.element).contains(targetNeedle) {
-            if candidates.count < maxCandidates {
-                candidates.append(elementPayload(item.element, depth: item.depth, path: item.path))
-            }
-            if selectedTarget == nil {
-                selectedTarget = item
+            if candidateItems.count < maxCandidates {
+                candidateItems.append(item)
+                var payload = elementPayload(item.element, depth: item.depth, path: item.path)
+                payload["candidate_index"] = candidateItems.count - 1
+                payload["visible_in_window"] = rectsIntersect(rectAttribute(item.element, "AXFrame"), selectedWindowFrame)
+                candidates.append(payload)
             }
         }
         guard shouldDescend(role: role, depth: item.depth) else { continue }
@@ -289,6 +316,37 @@ if let webArea = locate.webArea {
                 ancestors: newAncestors
             ))
         }
+    }
+}
+
+let visibleItems: [(index: Int, item: QueueItem)] = candidateItems.enumerated().compactMap { index, item in
+    if !rectsIntersect(rectAttribute(item.element, "AXFrame"), selectedWindowFrame) {
+        return nil
+    }
+    return (index, item)
+}
+let survivorItems: [(index: Int, item: QueueItem)]
+if requireVisibleTarget {
+    survivorItems = visibleItems
+} else if preferVisibleTarget && !visibleItems.isEmpty {
+    survivorItems = visibleItems
+} else {
+    survivorItems = candidateItems.enumerated().map { (index: $0.offset, item: $0.element) }
+}
+
+if tieBreaker == "max_y" {
+    selectedTarget = survivorItems.max { lhs, rhs in
+        let lhsFrame = rectAttribute(lhs.item.element, "AXFrame")
+        let rhsFrame = rectAttribute(rhs.item.element, "AXFrame")
+        return (lhsFrame?["center_y"] ?? -Double.greatestFiniteMagnitude) < (rhsFrame?["center_y"] ?? -Double.greatestFiniteMagnitude)
+    }?.item
+} else {
+    selectedTarget = survivorItems.first?.item
+}
+
+let selectedCandidateIndex = selectedTarget.flatMap { selected in
+    candidateItems.firstIndex { candidate in
+        candidate.path == selected.path && candidate.depth == selected.depth
     }
 }
 
@@ -325,6 +383,15 @@ emit([
     "marker_bridge": markerBridge,
     "target_search_visited_count": visitedTargets,
     "target_found": selectedTarget != nil,
+    "candidate_count": candidateItems.count,
+    "visible_candidate_count": visibleItems.count,
+    "survivor_count": survivorItems.count,
+    "selection_policy": [
+        "require_visible": requireVisibleTarget,
+        "prefer_visible": preferVisibleTarget,
+        "tie_breaker": tieBreaker,
+    ],
+    "selected_candidate_index": jsonValue(selectedCandidateIndex),
     "target_candidates": candidates,
     "selected_target": selectedTarget.map { elementPayload($0.element, depth: $0.depth, path: $0.path) } ?? [:],
     "selected_target_actions": targetActions,
