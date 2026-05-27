@@ -29,11 +29,13 @@ summary = json.loads((pack / "json/99_v20_summary.json").read_text(encoding="utf
 plan = json.loads((pack / "json/00_intent_plan.json").read_text(encoding="utf-8"))
 terminal = json.loads((pack / "json/99_terminal_scan_report.json").read_text(encoding="utf-8"))
 
-assert manifest.get("schema_version") == "v20.1", manifest
+assert manifest.get("schema_version") in {"v20.1", "v20.3"}, manifest
 assert manifest.get("armed") is False, manifest
 assert manifest.get("append_only_policy") is True, manifest
 assert manifest.get("json_fatal") is True, manifest
 assert manifest.get("screenshot_best_effort") is True, manifest
+if manifest.get("schema_version") == "v20.3":
+    assert manifest.get("temporal_hardening", {}).get("sealed_step_timestamps") is True, manifest
 assert manifest.get("file_count", 0) >= 6, manifest
 assert plan.get("plan_ready") is True, plan
 assert summary.get("armed") is False, summary
@@ -71,6 +73,9 @@ summary = json.loads((pack / "json/99_v20_summary.json").read_text(encoding="utf
 terminal = json.loads((pack / "json/99_terminal_scan_report.json").read_text(encoding="utf-8"))
 
 assert manifest.get("armed") is True, manifest
+assert manifest.get("schema_version") in {"v20.1", "v20.3"}, manifest
+if manifest.get("schema_version") == "v20.3":
+    assert manifest.get("temporal_hardening", {}).get("sealed_step_timestamps") is True, manifest
 assert summary.get("armed") is True, summary
 assert summary.get("sequence_complete") is True, summary
 assert summary.get("fresh_remap_before_each_step") is True, summary
@@ -107,6 +112,12 @@ step_asserts = [
 ]
 assert all(item["receipt"].get("fresh_remap_done") is True for item in step_asserts), step_asserts
 assert all(item["receipt"].get("stale_plan_coordinates_used") is False for item in step_asserts), step_asserts
+if manifest.get("schema_version") == "v20.3":
+    step_pre = json.loads((pack / "json/01_step-0-trigger-modal_pre_remap.json").read_text(encoding="utf-8"))
+    step_driver = json.loads((pack / "json/01_step-0-trigger-modal_driver_receipt.json").read_text(encoding="utf-8"))
+    step_post = json.loads((pack / "json/01_step-0-trigger-modal_post_assert.json").read_text(encoding="utf-8"))
+    assert step_pre.get("sealed_utc_timestamp_ms") <= step_driver.get("sealed_utc_timestamp_ms") <= step_post.get("sealed_utc_timestamp_ms"), (step_pre, step_driver, step_post)
+    assert step_pre.get("evidence_write_order") < step_driver.get("evidence_write_order") < step_post.get("evidence_write_order"), (step_pre, step_driver, step_post)
 
 print(json.dumps({
     "event": "v201_armed_evidence_assertions",

@@ -64,6 +64,20 @@ def parse_dt(value):
     except ValueError:
         return None
 
+def sealed_ms(payload):
+    value = payload.get("sealed_utc_timestamp_ms")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return None
+
+def sealed_order(payload):
+    value = payload.get("evidence_write_order")
+    if isinstance(value, int):
+        return value
+    return None
+
 if not pack.exists():
     raise SystemExit(f"[v20.2] evidence pack not found: {pack}")
 if not manifest_path.exists():
@@ -71,13 +85,15 @@ if not manifest_path.exists():
 
 manifest = load_json(manifest_path)
 armed = manifest.get("armed")
-schema_ok = manifest.get("schema_version") == "v20.1"
+schema_ok = manifest.get("schema_version") in {"v20.1", "v20.3"}
 if not schema_ok:
     fatal.append({
         "code": "MANIFEST_SCHEMA_FATAL",
-        "expected": "v20.1",
+        "expected": "v20.1|v20.3",
         "actual": manifest.get("schema_version"),
     })
+temporal_hardening = manifest.get("temporal_hardening") or {}
+sealed_manifest_time = temporal_hardening.get("sealed_step_timestamps") is True
 
 manifest_files = {}
 for item in manifest.get("files") or []:
@@ -206,24 +222,64 @@ for step in steps:
     if armed is True and step["driver_path"] not in manifest_files:
         fatal.append({"code": "DRIVER_RECEIPT_MISSING_FATAL", "step_id": step["step_id"], "path": step["driver_path"]})
 
-    pre_mtime = actual_files.get(step["pre_path"]).stat().st_mtime if actual_files.get(step["pre_path"]) else None
-    driver_mtime = actual_files.get(step["driver_path"]).stat().st_mtime if actual_files.get(step["driver_path"]) else None
-    post_mtime = actual_files.get(step["post_path"]).stat().st_mtime if actual_files.get(step["post_path"]) else None
+    pre_sealed_ms = sealed_ms(pre)
+    driver_sealed_ms = sealed_ms(driver)
+    post_sealed_ms = sealed_ms(post)
+    pre_order = sealed_order(pre)
+    driver_order = sealed_order(driver)
+    post_order = sealed_order(post)
+    sealed_step_time_available = all(value is not None for value in (pre_sealed_ms, driver_sealed_ms, post_sealed_ms))
+    sealed_step_order_available = all(value is not None for value in (pre_order, driver_order, post_order))
     time_deltas = {}
-    if pre_mtime is not None and driver_mtime is not None:
-        time_deltas["pre_to_driver_ms_mtime_advisory"] = round((driver_mtime - pre_mtime) * 1000, 3)
-    if driver_mtime is not None and post_mtime is not None:
-        time_deltas["driver_to_post_ms_mtime_advisory"] = round((post_mtime - driver_mtime) * 1000, 3)
-    for key, value in time_deltas.items():
-        if value > threshold_ms:
-            warnings.append({
-                "code": "TIME_TEAR_WARNING",
+    if sealed_step_time_available:
+        time_deltas["pre_to_driver_ms"] = driver_sealed_ms - pre_sealed_ms
+        time_deltas["driver_to_post_ms"] = post_sealed_ms - driver_sealed_ms
+        if time_deltas["pre_to_driver_ms"] < 0 or time_deltas["driver_to_post_ms"] < 0:
+            fatal.append({
+                "code": "SEALED_TIMESTAMP_ORDER_FATAL",
                 "step_id": step["step_id"],
-                "metric": key,
-                "threshold_ms": threshold_ms,
-                "value_ms": value,
-                "basis": "filesystem_mtime_not_manifest_sealed",
+                "time_deltas": time_deltas,
             })
+        if time_deltas["pre_to_driver_ms"] > threshold_ms:
+            fatal.append({
+                "code": "TIME_TEAR_VIOLATION",
+                "step_id": step["step_id"],
+                "metric": "pre_to_driver_ms",
+                "threshold_ms": threshold_ms,
+                "value_ms": time_deltas["pre_to_driver_ms"],
+                "basis": "sealed_ledger_timestamp",
+            })
+    else:
+        pre_mtime = actual_files.get(step["pre_path"]).stat().st_mtime if actual_files.get(step["pre_path"]) else None
+        driver_mtime = actual_files.get(step["driver_path"]).stat().st_mtime if actual_files.get(step["driver_path"]) else None
+        post_mtime = actual_files.get(step["post_path"]).stat().st_mtime if actual_files.get(step["post_path"]) else None
+        if pre_mtime is not None and driver_mtime is not None:
+            time_deltas["pre_to_driver_ms_mtime_advisory"] = round((driver_mtime - pre_mtime) * 1000, 3)
+        if driver_mtime is not None and post_mtime is not None:
+            time_deltas["driver_to_post_ms_mtime_advisory"] = round((post_mtime - driver_mtime) * 1000, 3)
+        for key, value in time_deltas.items():
+            if value > threshold_ms:
+                warnings.append({
+                    "code": "TIME_TEAR_WARNING",
+                    "step_id": step["step_id"],
+                    "metric": key,
+                    "threshold_ms": threshold_ms,
+                    "value_ms": value,
+                    "basis": "filesystem_mtime_not_manifest_sealed",
+                })
+    if sealed_step_order_available and not (pre_order < driver_order < post_order):
+        fatal.append({
+            "code": "EVIDENCE_WRITE_ORDER_FATAL",
+            "step_id": step["step_id"],
+            "pre_order": pre_order,
+            "driver_order": driver_order,
+            "post_order": post_order,
+        })
+    if sealed_manifest_time and not sealed_step_time_available:
+        fatal.append({
+            "code": "SEALED_STEP_TIMESTAMP_MISSING_FATAL",
+            "step_id": step["step_id"],
+        })
 
     step_reports.append({
         "step_index": step["index"],
@@ -233,17 +289,38 @@ for step in steps:
         "driver_event_count": driver.get("driver_event_count", 0),
         "posted": receipt.get("posted"),
         "physical_input_posted": receipt.get("physical_input_posted"),
+        "sealed_timestamp_ms": {
+            "pre": pre_sealed_ms,
+            "driver": driver_sealed_ms,
+            "post": post_sealed_ms,
+        },
+        "evidence_write_order": {
+            "pre": pre_order,
+            "driver": driver_order,
+            "post": post_order,
+        },
         "time_deltas": time_deltas,
     })
 
 sealed_timestamps = []
+sealed_step_timestamp_count = 0
 for path in ["json/00_intent_plan.json", "json/99_v20_summary.json", "json/99_terminal_scan_report.json"]:
     payload = load_json(pack / path) if (pack / path).exists() else {}
+    if sealed_ms(payload) is not None:
+        sealed_step_timestamp_count += 1
     for key in ("created_at_utc", "timestamp_utc", "timestamp"):
         parsed = parse_dt(payload.get(key))
         if parsed is not None:
             sealed_timestamps.append({"path": path, "key": key, "value": payload.get(key)})
-if len(sealed_timestamps) < 2:
+for step in steps:
+    if sealed_ms(step["pre"]) is not None:
+        sealed_step_timestamp_count += 1
+    if sealed_ms(step["driver"]) is not None:
+        sealed_step_timestamp_count += 1
+    if sealed_ms(step["post"]) is not None:
+        sealed_step_timestamp_count += 1
+sealed_step_timestamps_available = sealed_manifest_time or sealed_step_timestamp_count >= max(1, len(steps) * 3)
+if not sealed_step_timestamps_available:
     warnings.append({
         "code": "SEALED_STEP_TIMESTAMPS_UNAVAILABLE",
         "time_threshold_enforced": False,
@@ -277,8 +354,9 @@ report = {
     "isr_event_count": isr_log.get("isr_event_count", 0),
     "time_threshold": {
         "threshold_ms": threshold_ms,
-        "sealed_step_timestamps_available": len(sealed_timestamps) >= 2,
-        "mtime_advisory_only": True,
+        "sealed_step_timestamps_available": sealed_step_timestamps_available,
+        "time_tear_fatal_enforced": sealed_step_timestamps_available,
+        "mtime_advisory_only": not sealed_step_timestamps_available,
         "warning_count": sum(1 for item in warnings if item.get("code") == "TIME_TEAR_WARNING"),
     },
     "step_count": len(steps),

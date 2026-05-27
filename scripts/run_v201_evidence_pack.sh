@@ -286,12 +286,47 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
+import time
 
 pack_dir = pathlib.Path(sys.argv[1])
 manifest_path = pathlib.Path(sys.argv[2])
 armed = sys.argv[3] == "true"
+
+def ledger_sort_key(path):
+    rel = str(path.relative_to(pack_dir))
+    name = path.name
+    if rel == "json/00_intent_plan.json":
+        return (0, rel)
+    if name.startswith("00_run_start"):
+        return (1, rel)
+    match = re.match(r"(\d{2})_.+_(pre_remap|driver_receipt|post_assert)\.json$", name)
+    if match:
+        type_order = {
+            "pre_remap": 0,
+            "driver_receipt": 1,
+            "post_assert": 2,
+        }[match.group(2)]
+        return (10 + int(match.group(1)) * 10 + type_order, rel)
+    if rel == "json/50_isr_intervention_log.json":
+        return (50, rel)
+    if name.startswith("90_final_terminal_state"):
+        return (90, rel)
+    if rel == "json/99_terminal_scan_report.json":
+        return (99, rel)
+    if rel == "json/99_v20_summary.json":
+        return (100, rel)
+    return (200, rel)
+
+json_files = sorted((path for path in (pack_dir / "json").glob("*.json") if path.is_file()), key=ledger_sort_key)
+for order, path in enumerate(json_files, start=1):
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["evidence_schema_version"] = "v20.3-temporal-hardening"
+    payload["evidence_write_order"] = order
+    payload["sealed_utc_timestamp_ms"] = time.time_ns() // 1_000_000
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 files = []
 for path in sorted(pack_dir.rglob("*")):
@@ -307,7 +342,7 @@ for path in sorted(pack_dir.rglob("*")):
 git_commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
 manifest = {
     "event": "v201_evidence_pack_manifest",
-    "schema_version": "v20.1",
+    "schema_version": "v20.3",
     "created_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
     "pack_dir": str(pack_dir),
     "armed": armed,
@@ -320,6 +355,13 @@ manifest = {
     "append_only_policy": True,
     "json_fatal": True,
     "screenshot_best_effort": True,
+    "temporal_hardening": {
+        "schema_version": "v20.3",
+        "sealed_step_timestamps": True,
+        "timestamp_field": "sealed_utc_timestamp_ms",
+        "order_field": "evidence_write_order",
+        "time_source": "ledger_materialization_utc",
+    },
     "file_count": len(files),
     "files": files,
 }
