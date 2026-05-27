@@ -12,6 +12,7 @@ DRIVER_LOG="${GENESIS_V170B_DRIVER_LOG:-/tmp/genesis_os_driver_v170b.log}"
 BROWSER_APP="${GENESIS_V170B_BROWSER_APP:-Safari}"
 BROWSER_BUNDLE_ID="${GENESIS_V170B_BROWSER_BUNDLE_ID:-com.apple.Safari}"
 TARGET_URL="${GENESIS_V170B_TARGET_URL:-https://www.w3.org/WAI/ARIA/apg/patterns/combobox/examples/combobox-select-only/}"
+TARGET_CACHE_BUST="${GENESIS_V170B_CACHE_BUST:-1}"
 URL_DOMAIN_LOCK="${GENESIS_V170B_URL_DOMAIN_LOCK:-w3.org/WAI/ARIA/apg/patterns/combobox/examples/combobox-select-only}"
 WINDOW_TITLE="${GENESIS_V170B_WINDOW_TITLE:-Select-Only Combobox}"
 COMBO_LABEL="${GENESIS_V170B_COMBO_LABEL:-Favorite Fruit}"
@@ -329,7 +330,24 @@ PY
 echo "========================================================================"
 echo "Genesis v17.0b Public Combobox State Collapse"
 echo "========================================================================"
-echo "[v17.0b] URL: $TARGET_URL"
+
+EFFECTIVE_TARGET_URL="$TARGET_URL"
+if [[ "$TARGET_CACHE_BUST" == "1" ]]; then
+    EFFECTIVE_TARGET_URL="$(python3 - "$TARGET_URL" <<'PY'
+import sys
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+url = sys.argv[1]
+parts = urlsplit(url)
+query = dict(parse_qsl(parts.query, keep_blank_values=True))
+import time
+query["genesis_v170b_reset"] = str(int(time.time() * 1000))
+print(urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)))
+PY
+)"
+fi
+
+echo "[v17.0b] URL: $EFFECTIVE_TARGET_URL"
 echo "[v17.0b] Combo: $COMBO_LABEL -> $OPTION_LABEL"
 
 rm -rf "$OUTPUT_DIR"
@@ -352,7 +370,7 @@ else
 fi
 
 swiftc scripts/ax_v170b_w3c_combobox_probe.swift -o "$PROBE_BIN"
-open_public_url "$TARGET_URL"
+open_public_url "$EFFECTIVE_TARGET_URL"
 wait_for_domain_url >/dev/null
 assert_domain_lock "$(current_url || true)"
 
