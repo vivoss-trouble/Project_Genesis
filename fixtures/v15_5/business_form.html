@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Genesis v15.5 Business Flow</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f4f6f8;
+      color: #16191f;
+    }
+    main {
+      width: min(820px, calc(100vw - 64px));
+      margin: 88px auto;
+      padding: 32px;
+      background: white;
+      border: 1px solid #d3d7df;
+      border-radius: 10px;
+    }
+    h1 {
+      margin: 0 0 18px;
+      font-size: 32px;
+    }
+    label {
+      display: grid;
+      gap: 8px;
+      margin: 20px 0;
+      font-weight: 700;
+    }
+    input,
+    select {
+      min-height: 42px;
+      padding: 0 12px;
+      border: 1px solid #aeb4bf;
+      border-radius: 6px;
+      font: inherit;
+      font-weight: 400;
+    }
+    button {
+      min-width: 180px;
+      min-height: 48px;
+      border: 0;
+      border-radius: 8px;
+      background: #2457c5;
+      color: white;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .status {
+      margin-top: 24px;
+      min-height: 32px;
+      padding: 12px;
+      border: 1px solid #cfd5de;
+      border-radius: 6px;
+      background: #f8fafc;
+    }
+    .backdrop {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      background: rgba(20, 24, 34, 0.45);
+    }
+    .backdrop[hidden] {
+      display: none;
+    }
+    .dialog {
+      width: min(520px, calc(100vw - 72px));
+      padding: 28px;
+      background: white;
+      border: 2px solid #242936;
+      border-radius: 8px;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.28);
+    }
+    .dialog h2 {
+      margin: 0 0 12px;
+      font-size: 26px;
+    }
+    .dialog p {
+      line-height: 1.5;
+    }
+    .dialog-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 24px;
+    }
+    .close {
+      background: #126236;
+    }
+    .trap {
+      background: #7f3b08;
+    }
+  </style>
+</head>
+<body data-profile-saved="false">
+  <main>
+    <h1>Genesis v15.5 Business Flow</h1>
+    <p>This fixture validates state mutation after ISR clearance without URL navigation.</p>
+    <label>
+      Operator Code
+      <input aria-label="Operator Code" id="operator-code" autocomplete="off">
+    </label>
+    <label>
+      Mission Mode
+      <select aria-label="Mission Mode" id="mission-mode">
+        <option value="standby">standby</option>
+        <option value="survey">survey</option>
+      </select>
+    </label>
+    <button type="button" aria-label="Commit profile" onclick="commitProfile()">Commit profile</button>
+    <div class="status" aria-label="Profile Status" role="status" id="profile-status">profile_idle</div>
+  </main>
+
+  <div class="backdrop" role="dialog" aria-modal="true" aria-label="Genesis business modal">
+    <section class="dialog">
+      <h2>Genesis business modal</h2>
+      <p>This controlled obstacle must be cleared before the business state mutation can proceed.</p>
+      <div class="dialog-actions">
+        <button type="button" class="close" aria-label="Close" onclick="document.querySelector('.backdrop').hidden = true">Close</button>
+        <button type="button" class="trap" aria-label="Accept all">Accept all</button>
+        <button type="button" class="trap" aria-label="Subscribe">Subscribe</button>
+        <button type="button" class="trap" aria-label="Continue">Continue</button>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    function commitProfile() {
+      const code = document.getElementById('operator-code').value || 'empty';
+      const mode = document.getElementById('mission-mode').value || 'standby';
+      document.body.dataset.profileSaved = 'true';
+      document.getElementById('profile-status').textContent = `profile_saved:${code}:${mode}`;
+    }
+  </script>
+</body>
+</html>
