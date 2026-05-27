@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Genesis v18.0 Long-Clock Business - Page 1</title>
+  <link rel="stylesheet" href="v18.css">
+</head>
+<body data-profile-saved="false" data-page-index="1">
+  <main>
+    <p class="eyebrow">Genesis v18.0 / page 1</p>
+    <h1>Long-Clock Business Mutation</h1>
+    <p>Each page repeats the same composite form to expose ghost focus, cached values, and leaked state.</p>
+
+    <section class="panel" aria-label="Composite profile form">
+      <label>
+        Operator Code
+        <input aria-label="Operator Code" id="operator-code" autocomplete="off">
+      </label>
+
+      <label class="check-row">
+        <input type="checkbox" aria-label="Enable survey mode" id="survey-mode">
+        <span>Enable survey mode</span>
+      </label>
+
+      <div class="combo-field" aria-label="Favorite Fruit">
+        <p>Favorite Fruit</p>
+        <button type="button" class="combo-trigger" aria-label="Favorite Fruit" aria-expanded="false" onclick="toggleFruitList()">Favorite Fruit: Choose a Fruit</button>
+        <div class="combo-options" role="listbox" aria-label="Favorite Fruit Options" hidden>
+          <button type="button" aria-label="Apple" onclick="selectFruit('Apple')">Apple</button>
+          <button type="button" aria-label="Banana" onclick="selectFruit('Banana')">Banana</button>
+          <button type="button" aria-label="Cherry" onclick="selectFruit('Cherry')">Cherry</button>
+        </div>
+      </div>
+
+      <button type="button" aria-label="Commit profile" onclick="commitProfile()">Commit profile</button>
+      <div class="status" aria-label="Profile Status" role="status" id="profile-status">profile_idle</div>
+    </section>
+
+    <button type="button" class="next" aria-label="Next chapter" onclick="location.href='page2.html'">Next chapter</button>
+  </main>
+
+  <div class="backdrop" role="dialog" aria-modal="true" aria-label="Genesis v18 modal">
+    <section class="dialog">
+      <h2>Genesis v18 modal</h2>
+      <p>This controlled obstacle must be cleared before the page business mutation can proceed.</p>
+      <div class="dialog-actions">
+        <button type="button" class="close" aria-label="Close" onclick="document.querySelector('.backdrop').hidden = true">Close</button>
+        <button type="button" class="trap" aria-label="Accept all">Accept all</button>
+        <button type="button" class="trap" aria-label="Subscribe">Subscribe</button>
+        <button type="button" class="trap" aria-label="Continue">Continue</button>
+      </div>
+    </section>
+  </div>
+
+  <script src="v18.js?genesis_v18=2"></script>
+</body>
+</html>
