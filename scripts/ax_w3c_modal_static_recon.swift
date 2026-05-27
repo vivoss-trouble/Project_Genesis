@@ -334,6 +334,11 @@ let safeToArm = !dialogMatches.isEmpty
     && legalCandidateCount == 1
     && candidatePayloads.count >= 2
     && rejectedCandidateCount >= 1
+let selectedClearance = candidatePayloads.first { ($0["legal_candidate"] as? Bool) == true }
+let selectedClearanceFrame = selectedClearance?["frame"] as? [String: Double]
+let clearancePoint = selectedClearanceFrame.map {
+    ["x": $0["center_x"] ?? 0, "y": $0["center_y"] ?? 0]
+}
 
 emit([
     "event": "v145a2_w3c_modal_static_recon",
@@ -359,6 +364,8 @@ emit([
     "legal_candidate_count": legalCandidateCount,
     "rejected_candidate_count": rejectedCandidateCount,
     "candidates": candidatePayloads,
+    "selected_clearance": selectedClearance ?? [:],
+    "clearance_point": jsonValue(clearancePoint),
     "safe_to_arm": safeToArm,
     "whitelist": Array(whitelist).sorted(),
     "blacklist": blacklist,
