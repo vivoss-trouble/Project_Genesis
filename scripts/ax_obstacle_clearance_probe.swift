@@ -7,6 +7,7 @@ let bundleIdNeedle = env["GENESIS_V130_BROWSER_BUNDLE_ID"] ?? "com.apple.Safari"
 let browserNameNeedle = (env["GENESIS_V130_BROWSER_APP"] ?? "Safari").lowercased()
 let titleNeedle = (env["GENESIS_V130_WINDOW_TITLE"] ?? "Genesis v13.0 Obstacle Fixture").lowercased()
 let targetNeedle = (env["GENESIS_V130_TARGET_TITLE"] ?? "Next chapter").lowercased()
+let publicRecon = env["GENESIS_V130_PUBLIC_RECON"] == "1"
 let maxDepth = Int(env["GENESIS_V130_AX_MAX_DEPTH"] ?? "12") ?? 12
 let maxNodes = Int(env["GENESIS_V130_AX_MAX_NODES"] ?? "2400") ?? 2400
 let whitelist = Set((env["GENESIS_V130_WHITELIST"] ?? "close,dismiss,not now,reject all,decline")
@@ -292,15 +293,21 @@ let targetContainingContainers = allItems.filter { item in
 let targetContainingContainerPayloads = targetContainingContainers.map {
     elementPayload($0.element, depth: $0.depth, path: $0.path)
 }
+let publicReconContainers = allItems.filter { item in
+    let role = stringAttribute(item.element, kAXRoleAttribute)
+    guard containerRoles.contains(role) else { return false }
+    return rectAttribute(item.element, "AXFrame") != nil
+}
+let occluderSearchContainers = publicRecon ? publicReconContainers : targetContainingContainers
 
-let modalOccluderItem = targetContainingContainers
+let modalOccluderItem = occluderSearchContainers
     .filter(isOccluderLike)
     .min { lhs, rhs in
         let lhsArea = rectAttribute(lhs.element, "AXFrame")?["area"] ?? Double.greatestFiniteMagnitude
         let rhsArea = rectAttribute(rhs.element, "AXFrame")?["area"] ?? Double.greatestFiniteMagnitude
         return lhsArea < rhsArea
     }
-let iframeOccluderItem = targetContainingContainers
+let iframeOccluderItem = occluderSearchContainers
     .filter(isIframeOccluderLike)
     .min { lhs, rhs in
         let lhsArea = rectAttribute(lhs.element, "AXFrame")?["area"] ?? Double.greatestFiniteMagnitude
@@ -310,7 +317,7 @@ let iframeOccluderItem = targetContainingContainers
 let occluderItem = modalOccluderItem ?? iframeOccluderItem
 let occluderKind = modalOccluderItem != nil ? "modal" : (iframeOccluderItem != nil ? "iframe" : "none")
 let occluderFrame = occluderItem.flatMap { rectAttribute($0.element, "AXFrame") }
-let occlusionClear = targetItem != nil && occluderItem == nil
+let occlusionClear = publicRecon ? occluderItem == nil : targetItem != nil && occluderItem == nil
 
 var candidatePayloads: [[String: Any]] = []
 var legalItems: [QueueItem] = []
@@ -372,6 +379,7 @@ emit([
     "selected_window_title": stringAttribute(selectedWindow, kAXTitleAttribute),
     "window_frame": jsonValue(rectAttribute(selectedWindow, "AXFrame")),
     "target_found": targetItem != nil,
+    "public_recon": publicRecon,
     "target": targetItem.map { elementPayload($0.element, depth: $0.depth, path: $0.path) } ?? [:],
     "target_point": jsonValue(targetPoint),
     "occlusion_clear": occlusionClear,
