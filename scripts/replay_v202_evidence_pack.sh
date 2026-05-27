@@ -85,6 +85,7 @@ if not manifest_path.exists():
 
 manifest = load_json(manifest_path)
 armed = manifest.get("armed")
+run_profile = manifest.get("run_profile")
 schema_ok = manifest.get("schema_version") in {"v20.1", "v20.3"}
 if not schema_ok:
     fatal.append({
@@ -202,7 +203,23 @@ if armed is True:
 else:
     if summary.get("armed") is not False:
         fatal.append({"code": "DRY_RUN_SUMMARY_MISMATCH_FATAL", "summary_armed": summary.get("armed")})
-    if summary.get("stop_reason") != "dry_run_plan_execution_boundary":
+    if run_profile == "v21.0a-read-only-recon":
+        if manifest.get("read_only_recon") is not True or summary.get("read_only_recon") is not True:
+            fatal.append({
+                "code": "READ_ONLY_RECON_PROFILE_FATAL",
+                "manifest_read_only_recon": manifest.get("read_only_recon"),
+                "summary_read_only_recon": summary.get("read_only_recon"),
+            })
+        if summary.get("posted") is not False or summary.get("physical_input_posted") is not False or summary.get("os_driver_active") is not False:
+            fatal.append({"code": "READ_ONLY_RECON_ZERO_KINETIC_FATAL", "summary": summary})
+        if summary.get("domain_locked") is not True:
+            fatal.append({"code": "READ_ONLY_RECON_DOMAIN_LOCK_FATAL", "summary": summary})
+        if summary.get("stop_reason") not in {
+            "plan_ready_read_only_boundary",
+            "plan_not_ready_read_only_boundary",
+        }:
+            fatal.append({"code": "READ_ONLY_RECON_BOUNDARY_FATAL", "summary": summary})
+    elif summary.get("stop_reason") != "dry_run_plan_execution_boundary":
         fatal.append({"code": "DRY_RUN_BOUNDARY_FATAL", "summary": summary})
 
 step_reports = []
@@ -345,6 +362,8 @@ report = {
     "pack_dir": str(pack),
     "schema_verified": schema_ok,
     "armed": armed,
+    "run_profile": run_profile,
+    "read_only_recon": manifest.get("read_only_recon") is True or summary.get("read_only_recon") is True,
     "manifest_file_count": len(manifest_files),
     "actual_file_count": len(actual_files),
     "cryptographic_seal_ok": not missing_files and not extra_files and not tampered_files,
