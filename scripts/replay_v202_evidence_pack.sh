@@ -344,17 +344,28 @@ if not sealed_step_timestamps_available:
         "reason": "v20.1 evidence packs do not seal per-step UTC timestamps; mtime checks are advisory only",
     })
 
+kinetic_source_path = "raw/v16_exec_results.jsonl"
+if run_profile == "v21.1-standard-public-form":
+    kinetic_source_path = "raw/v211_exec_results.jsonl"
+
 kinetic_delta_ok = True
 if armed is True:
-    if "raw/v16_exec_results.jsonl" not in manifest_files:
+    if kinetic_source_path not in manifest_files:
         kinetic_delta_ok = False
-        fatal.append({"code": "ARMED_KINETIC_SOURCE_MISSING_FATAL", "path": "raw/v16_exec_results.jsonl"})
+        fatal.append({"code": "ARMED_KINETIC_SOURCE_MISSING_FATAL", "path": kinetic_source_path})
     if not any((step["post"].get("receipt") or {}).get("physical_input_posted") is True for step in steps):
         kinetic_delta_ok = False
         fatal.append({"code": "ARMED_PHYSICAL_INPUT_MISSING_FATAL"})
+    if run_profile == "v21.1-standard-public-form":
+        if summary.get("url_changed") is not True:
+            fatal.append({"code": "HTTPBIN_NAVIGATION_FATAL", "summary": summary})
+        if summary.get("response_state_asserted") is not True:
+            fatal.append({"code": "HTTPBIN_RESPONSE_ASSERTION_FATAL", "summary": summary})
+        if summary.get("commit_click_posted") is not True:
+            fatal.append({"code": "HTTPBIN_COMMIT_CLICK_FATAL", "summary": summary})
 else:
-    if "raw/v16_exec_results.jsonl" in manifest_files:
-        warnings.append({"code": "DRY_RUN_HAS_V16_TRACE_WARNING", "path": "raw/v16_exec_results.jsonl"})
+    if kinetic_source_path in manifest_files:
+        warnings.append({"code": "DRY_RUN_HAS_KINETIC_TRACE_WARNING", "path": kinetic_source_path})
 
 report = {
     "event": "v202_replay_verdict",

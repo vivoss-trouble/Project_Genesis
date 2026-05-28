@@ -8,10 +8,14 @@ let browserNameNeedle = (env["GENESIS_V190_BROWSER_APP"] ?? "Safari").lowercased
 let titleNeedle = (env["GENESIS_V190_WINDOW_TITLE"] ?? "Modal Dialog Example").lowercased()
 let targetUrl = env["GENESIS_V190_TARGET_URL"] ?? "https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/examples/dialog/"
 let domainLock = env["GENESIS_V190_URL_DOMAIN_LOCK"] ?? "w3.org/WAI/ARIA/apg/patterns/dialog-modal/examples/dialog"
+let planProfile = env["GENESIS_V190_PLAN_PROFILE"] ?? "w3c_modal_business"
 let triggerNeedle = (env["GENESIS_V190_TRIGGER_TITLE"] ?? "Add Delivery Address").lowercased()
 let expectedFieldNeedle = env["GENESIS_V190_EXPECT_FIELD_TITLE"] ?? "Street"
 let expectedCommitNeedle = env["GENESIS_V190_EXPECT_COMMIT_TITLE"] ?? "Verify Address"
 let expectedSuccessNeedle = env["GENESIS_V190_EXPECT_SUCCESS_TITLE"] ?? "Verification Result"
+let httpbinFieldNeedle = (env["GENESIS_V190_HTTPBIN_FIELD_LABEL"] ?? "Customer name").lowercased()
+let httpbinCommitNeedle = (env["GENESIS_V190_HTTPBIN_COMMIT_TITLE"] ?? "Submit order").lowercased()
+let httpbinExpectedValue = env["GENESIS_V190_HTTPBIN_EXPECT_VALUE"] ?? "Genesis"
 let maxDepth = Int(env["GENESIS_V190_AX_MAX_DEPTH"] ?? "14") ?? 14
 let maxNodes = Int(env["GENESIS_V190_AX_MAX_NODES"] ?? "4200") ?? 4200
 
@@ -268,13 +272,56 @@ while !queue.isEmpty && visited < maxNodes {
     }
 }
 
-let selectedTrigger = triggerCandidates.first
 let controlsByKind = Dictionary(grouping: controls) { ($0["control_kind"] as? String) ?? "unknown" }
 let observedControlTypes = controlsByKind.keys.sorted()
 let modalActive = !modalCandidates.isEmpty
-let planSteps: [[String: Any]]
+let domainLocked = targetUrl.contains(domainLock)
+let selectedTrigger = triggerCandidates.first
+let httpbinTextInputs = controls.filter { ($0["control_kind"] as? String) == "text_input" }
+let httpbinSubmitCandidates = controls.filter { control in
+    let label = ((control["label"] as? String) ?? "").lowercased()
+    let kind = (control["control_kind"] as? String) ?? ""
+    return (kind == "button" || kind == "pressable") && label.contains(httpbinCommitNeedle)
+}
 
-if let selectedTrigger {
+let planSteps: [[String: Any]]
+let safeToArm: Bool
+
+if planProfile == "httpbin_standard_form" {
+    if !httpbinTextInputs.isEmpty && !httpbinSubmitCandidates.isEmpty {
+        planSteps = [
+            [
+                "step_id": "step-0-fill-customer-name",
+                "phase": "public_standard_form_text_mutation",
+                "target_label": httpbinFieldNeedle,
+                "control_type": "text_input",
+                "planned_weapon": "v21_1_textfield_transport",
+                "requires_fresh_remap_before_fire": true,
+                "expected_value": httpbinExpectedValue,
+                "posted": false,
+                "physical_input_posted": false,
+            ],
+            [
+                "step_id": "step-1-submit-form",
+                "phase": "public_standard_form_commit",
+                "target_label": httpbinCommitNeedle,
+                "control_type": "button",
+                "planned_weapon": "physical_click_after_validation",
+                "requires_fresh_remap_before_fire": true,
+                "termination_expectation": httpbinExpectedValue,
+                "posted": false,
+                "physical_input_posted": false,
+            ],
+        ]
+    } else {
+        planSteps = []
+    }
+    safeToArm = domainLocked
+        && !modalActive
+        && !httpbinTextInputs.isEmpty
+        && !httpbinSubmitCandidates.isEmpty
+        && planSteps.count == 2
+} else if let selectedTrigger {
     planSteps = [
         [
             "step_id": "step-0-trigger-modal",
@@ -310,20 +357,19 @@ if let selectedTrigger {
             "physical_input_posted": false,
         ],
     ]
+    safeToArm = domainLocked
+        && !modalActive
+        && planSteps.count >= 3
 } else {
     planSteps = []
+    safeToArm = false
 }
-
-let domainLocked = targetUrl.contains(domainLock)
-let safeToArm = domainLocked
-    && selectedTrigger != nil
-    && !modalActive
-    && planSteps.count >= 3
 
 emit([
     "event": "v190_public_task_plan",
     "status": "ok",
     "taxonomy_version": "v19.0-public-read-only-task-planner",
+    "plan_profile": planProfile,
     "accessibility_api_trusted": trusted,
     "browser_pid": app.processIdentifier,
     "browser_bundle_id": app.bundleIdentifier ?? "",
@@ -342,6 +388,12 @@ emit([
     "trigger_found": selectedTrigger != nil,
     "trigger_candidate_count": triggerCandidates.count,
     "trigger_candidate": jsonValue(selectedTrigger),
+    "httpbin_standard_form": [
+        "field_candidate_count": httpbinTextInputs.count,
+        "submit_candidate_count": httpbinSubmitCandidates.count,
+        "field_candidate": jsonValue(httpbinTextInputs.first),
+        "submit_candidate": jsonValue(httpbinSubmitCandidates.first),
+    ],
     "modal_active_on_load": modalActive,
     "public_obstacle_seen": modalActive,
     "isr_prediction": [
