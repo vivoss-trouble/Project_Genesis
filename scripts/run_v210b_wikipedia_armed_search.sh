@@ -13,6 +13,7 @@ SCREEN_DIR="$PACK_DIR/screenshots"
 WORK_DIR="$PACK_DIR/work"
 MANIFEST_PATH="$PACK_DIR/manifest.json"
 RESULTS_LOG="$WORK_DIR/results.jsonl"
+RUN_PROFILE="${GENESIS_V210B_RUN_PROFILE:-v21.0b-wikipedia-search}"
 
 TARGET_URL="${GENESIS_V210B_TARGET_URL:-https://www.wikipedia.org/}"
 WINDOW_TITLE="${GENESIS_V210B_WINDOW_TITLE:-Wikipedia}"
@@ -30,7 +31,9 @@ OS_SOCKET="${GENESIS_V210B_OS_SOCKET:-/tmp/genesis_os_driver_v210b.sock}"
 DRIVER_LOG="${GENESIS_V210B_DRIVER_LOG:-/tmp/genesis_os_driver_v210b.log}"
 PLANNER_BIN="$WORK_DIR/ax_v190_public_task_planner"
 PROBE_BIN="$WORK_DIR/ax_v210b_wikipedia_search_probe"
+EXTRACTOR_BIN="$WORK_DIR/ax_v220_wikipedia_result_extractor"
 SHADOW_BIN="$WORK_DIR/open_web_shadow_map"
+RESULT_EXTRACTION="${GENESIS_V210B_RESULT_EXTRACTION:-0}"
 ARMED_TOKEN="GENESIS_V210B_ARMED_WIKIPEDIA_SEARCH"
 AUTO_FIRE_TOKEN="GENESIS_V210B_AUTO_FIRE_WIKIPEDIA_SEARCH"
 DRIVER_PID=""
@@ -358,6 +361,12 @@ run_probe() {
         "$PROBE_BIN"
 }
 
+run_result_extractor() {
+    GENESIS_V220_SEARCH_QUERY="$SEARCH_QUERY" \
+    GENESIS_V220_URL_DOMAIN_LOCK="$URL_DOMAIN_LOCK" \
+        "$EXTRACTOR_BIN"
+}
+
 set_search_field() {
     GENESIS_V210B_WINDOW_TITLE="$WINDOW_TITLE" \
     GENESIS_V210B_SEARCH_QUERY="$SEARCH_QUERY" \
@@ -435,6 +444,7 @@ stamp_and_manifest() {
 import datetime as dt
 import hashlib
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -486,13 +496,14 @@ git_commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], te
 manifest = {
     "event": "v210b_evidence_pack_manifest",
     "schema_version": "v20.3",
-    "run_profile": "v21.0b-wikipedia-search",
+    "run_profile": os.environ.get("GENESIS_V210B_RUN_PROFILE", "v21.0b-wikipedia-search"),
     "created_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
     "pack_dir": str(pack_dir),
     "armed": armed,
     "git_commit": git_commit,
     "tool_versions": {
         "run_v210b": "v21.0b",
+        "result_extractor": "v22.0" if os.environ.get("GENESIS_V210B_RESULT_EXTRACTION") == "1" else "disabled",
         "planner": "v19.0",
         "replay_verifier": "v20.2",
         "evidence_schema": "v20.3",
@@ -547,6 +558,7 @@ echo "========================================================================"
 echo "Genesis v21.0b Wikipedia Armed Search"
 echo "========================================================================"
 echo "[v21.0b] Evidence pack: $PACK_DIR"
+echo "[v21.0b] Run profile: $RUN_PROFILE"
 echo "[v21.0b] URL: $TARGET_URL"
 echo "[v21.0b] Query: $SEARCH_QUERY"
 
@@ -566,6 +578,9 @@ fi
 
 swiftc scripts/ax_v190_public_task_planner.swift -o "$PLANNER_BIN"
 swiftc scripts/ax_v210b_wikipedia_search_probe.swift -o "$PROBE_BIN"
+if [[ "$RESULT_EXTRACTION" == "1" ]]; then
+    swiftc scripts/ax_v220_wikipedia_result_extractor.swift -o "$EXTRACTOR_BIN"
+fi
 swiftc scripts/open_web_shadow_map.swift -o "$SHADOW_BIN"
 
 capture_snapshot "00_run_start"
@@ -638,11 +653,13 @@ PY
 if [[ "$ARMED" != true ]]; then
     write_json "$JSON_DIR/01_step-0-fill-search-field_driver_receipt.json" '{"event":"v201_step_driver_receipt","step_index":1,"step_id":"step-0-fill-search-field","driver_events":[],"driver_event_count":0}'
     write_json "$JSON_DIR/01_step-0-fill-search-field_post_assert.json" '{"event":"v201_step_post_assert","step_index":1,"step_id":"step-0-fill-search-field","receipt":{"fresh_remap_done":true,"stale_plan_coordinates_used":false,"posted":false,"physical_input_posted":false}}'
-    write_json "$JSON_DIR/99_v20_summary.json" "$(python3 - "$PLAN_PAYLOAD" <<'PY'
+    write_json "$JSON_DIR/99_v20_summary.json" "$(python3 - "$PLAN_PAYLOAD" "$RUN_PROFILE" <<'PY'
 import json, sys
 plan = json.loads(sys.argv[1])
+run_profile = sys.argv[2]
 print(json.dumps({
     "event": "v200_autonomous_execution_summary",
+    "run_profile": run_profile,
     "armed": False,
     "plan_consumed": True,
     "plan_ready": plan.get("plan_ready") is True,
@@ -1047,7 +1064,62 @@ print(json.dumps({
 PY
 )"
 
-SUMMARY_PAYLOAD="$(python3 - "$PLAN_PAYLOAD" "$SET_PAYLOAD" "$before_url" "$after_url" "$field_ready" "$field_transport" "$COMMIT_KEY_JSON" "$ASSERT_PAYLOAD" "$URL_DOMAIN_LOCK" "$SEARCH_QUERY" "$SEARCH_COMMIT_TRANSPORT" <<'PY'
+EXTRACTION_PAYLOAD="{}"
+EXTRACTION_ASSERTED=false
+EXTRACTION_URL="$after_url"
+if [[ "$RESULT_EXTRACTION" == "1" ]]; then
+    extraction_deadline_ms=$(( $(now_ms) + POLL_TIMEOUT_MS ))
+    while (( $(now_ms) <= extraction_deadline_ms )); do
+        EXTRACTION_PAYLOAD="$(run_result_extractor || printf '{}')"
+        EXTRACTION_ASSERTED="$(python3 - "$EXTRACTION_PAYLOAD" <<'PY'
+import json, sys
+try:
+    payload = json.loads(sys.argv[1])
+except Exception:
+    payload = {}
+print("true" if payload.get("extraction_asserted") is True else "false")
+PY
+)"
+        if [[ "$EXTRACTION_ASSERTED" == "true" ]]; then
+            break
+        fi
+        sleep "$(sleep_ms "$POLL_INTERVAL_MS")"
+    done
+    EXTRACTION_URL="$(current_url || true)"
+    write_json "$JSON_DIR/03_step-2-result-extraction_post_assert.json" "$(python3 - "$EXTRACTION_PAYLOAD" "$EXTRACTION_URL" "$URL_DOMAIN_LOCK" "$SEARCH_QUERY" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1]) if sys.argv[1] != "{}" else {}
+url, domain, query = sys.argv[2:5]
+title = payload.get("result_title") or ""
+lead = payload.get("lead_text_sample") or ""
+extraction_asserted = (
+    payload.get("extraction_asserted") is True
+    and domain in url
+    and query.lower() in (title + " " + lead + " " + url).lower()
+)
+payload.update({
+    "event": "v220_result_extraction_post_assert",
+    "url_after_extraction": url,
+    "domain_locked_after_extraction": domain in url,
+    "extraction_asserted": extraction_asserted,
+    "posted": False,
+    "physical_input_posted": False,
+    "os_driver_active": False,
+})
+print(json.dumps(payload, sort_keys=True))
+PY
+)"
+    emit "$(python3 - "$EXTRACTION_PAYLOAD" "$EXTRACTION_URL" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1]) if sys.argv[1] != "{}" else {}
+payload["event"] = "v220_result_extraction"
+payload["url_after_extraction"] = sys.argv[2]
+print(json.dumps(payload, sort_keys=True))
+PY
+)"
+fi
+
+SUMMARY_PAYLOAD="$(python3 - "$PLAN_PAYLOAD" "$SET_PAYLOAD" "$before_url" "$after_url" "$field_ready" "$field_transport" "$COMMIT_KEY_JSON" "$ASSERT_PAYLOAD" "$URL_DOMAIN_LOCK" "$SEARCH_QUERY" "$SEARCH_COMMIT_TRANSPORT" "$RUN_PROFILE" "$RESULT_EXTRACTION" "$EXTRACTION_PAYLOAD" "$EXTRACTION_ASSERTED" "$EXTRACTION_URL" <<'PY'
 import json, sys
 plan = json.loads(sys.argv[1])
 field_payload = json.loads(sys.argv[2])
@@ -1058,6 +1130,11 @@ commit_key = json.loads(sys.argv[7])
 assert_payload = json.loads(sys.argv[8]) if sys.argv[8] != "{}" else {}
 domain, query = sys.argv[9:11]
 commit_transport = sys.argv[11]
+run_profile = sys.argv[12]
+result_extraction_requested = sys.argv[13] == "1"
+extraction_payload = json.loads(sys.argv[14]) if sys.argv[14] != "{}" else {}
+extraction_asserted = sys.argv[15] == "true"
+extraction_url = sys.argv[16]
 commit_key_posted = (commit_key.get("receipt") or {}).get("posted") is True
 business_state_asserted = (
     domain in after_url
@@ -1076,9 +1153,11 @@ sequence_complete = (
     and domain in after_url
     and before_url != after_url
 )
+if result_extraction_requested:
+    sequence_complete = sequence_complete and extraction_asserted and domain in extraction_url
 print(json.dumps({
     "event": "v200_autonomous_execution_summary",
-    "run_profile": "v21.0b-wikipedia-search",
+    "run_profile": run_profile,
     "armed": True,
     "plan_consumed": True,
     "plan_ready": plan.get("plan_ready") is True,
@@ -1094,6 +1173,12 @@ print(json.dumps({
     "commit_key_posted": commit_key_posted,
     "commit_transport": commit_transport,
     "business_state_asserted": business_state_asserted,
+    "result_extraction_requested": result_extraction_requested,
+    "result_extraction_asserted": extraction_asserted,
+    "result_url": extraction_url,
+    "result_title": extraction_payload.get("result_title"),
+    "result_lead_text_length": extraction_payload.get("lead_text_length"),
+    "result_toc_found": extraction_payload.get("toc_found"),
     "url_before_commit": before_url,
     "url_after_commit": after_url,
     "domain_locked_after_commit": domain in after_url,

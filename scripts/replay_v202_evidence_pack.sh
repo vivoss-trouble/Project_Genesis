@@ -200,7 +200,7 @@ if armed is True:
         fatal.append({"code": "STEP_COUNT_FATAL", "expected": expected_steps, "actual": len(steps)})
     if not steps:
         fatal.append({"code": "ARMED_STEP_LEDGER_MISSING_FATAL"})
-    if run_profile == "v21.0b-wikipedia-search":
+    if run_profile in {"v21.0b-wikipedia-search", "v22.0-wikipedia-result-extraction"}:
         if summary.get("business_state_asserted") is not True:
             fatal.append({"code": "WIKIPEDIA_SEARCH_ASSERTION_FATAL", "summary": summary})
         if summary.get("domain_locked_after_commit") is not True:
@@ -209,6 +209,21 @@ if armed is True:
             fatal.append({"code": "WIKIPEDIA_SEARCH_CLICK_FATAL", "summary": summary})
         if summary.get("url_changed") is not True:
             fatal.append({"code": "WIKIPEDIA_SEARCH_NAVIGATION_FATAL", "summary": summary})
+        if run_profile == "v22.0-wikipedia-result-extraction":
+            extraction_path = "json/03_step-2-result-extraction_post_assert.json"
+            if extraction_path not in manifest_files:
+                fatal.append({"code": "WIKIPEDIA_EXTRACTION_LEDGER_MISSING_FATAL", "path": extraction_path})
+            extraction = load_json(pack / extraction_path) if (pack / extraction_path).exists() else {}
+            if summary.get("result_extraction_asserted") is not True or extraction.get("extraction_asserted") is not True:
+                fatal.append({
+                    "code": "WIKIPEDIA_EXTRACTION_ASSERTION_FATAL",
+                    "summary": summary,
+                    "extraction": extraction,
+                })
+            if summary.get("result_title") in {None, ""}:
+                fatal.append({"code": "WIKIPEDIA_EXTRACTION_TITLE_FATAL", "summary": summary})
+            if not isinstance(summary.get("result_lead_text_length"), int) or summary.get("result_lead_text_length", 0) < 40:
+                fatal.append({"code": "WIKIPEDIA_EXTRACTION_LEAD_FATAL", "summary": summary})
 else:
     if summary.get("armed") is not False:
         fatal.append({"code": "DRY_RUN_SUMMARY_MISMATCH_FATAL", "summary_armed": summary.get("armed")})
@@ -356,7 +371,7 @@ if not sealed_step_timestamps_available:
 kinetic_source_path = "raw/v16_exec_results.jsonl"
 if run_profile == "v21.1-standard-public-form":
     kinetic_source_path = "raw/v211_exec_results.jsonl"
-elif run_profile == "v21.0b-wikipedia-search":
+elif run_profile in {"v21.0b-wikipedia-search", "v22.0-wikipedia-result-extraction"}:
     kinetic_source_path = "raw/v21b_exec_results.jsonl"
 
 kinetic_delta_ok = True
