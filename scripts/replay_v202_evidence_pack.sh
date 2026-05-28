@@ -200,6 +200,15 @@ if armed is True:
         fatal.append({"code": "STEP_COUNT_FATAL", "expected": expected_steps, "actual": len(steps)})
     if not steps:
         fatal.append({"code": "ARMED_STEP_LEDGER_MISSING_FATAL"})
+    if run_profile == "v21.0b-wikipedia-search":
+        if summary.get("business_state_asserted") is not True:
+            fatal.append({"code": "WIKIPEDIA_SEARCH_ASSERTION_FATAL", "summary": summary})
+        if summary.get("domain_locked_after_commit") is not True:
+            fatal.append({"code": "WIKIPEDIA_SEARCH_DOMAIN_LOCK_FATAL", "summary": summary})
+        if summary.get("commit_click_posted") is not True:
+            fatal.append({"code": "WIKIPEDIA_SEARCH_CLICK_FATAL", "summary": summary})
+        if summary.get("url_changed") is not True:
+            fatal.append({"code": "WIKIPEDIA_SEARCH_NAVIGATION_FATAL", "summary": summary})
 else:
     if summary.get("armed") is not False:
         fatal.append({"code": "DRY_RUN_SUMMARY_MISMATCH_FATAL", "summary_armed": summary.get("armed")})
@@ -347,6 +356,8 @@ if not sealed_step_timestamps_available:
 kinetic_source_path = "raw/v16_exec_results.jsonl"
 if run_profile == "v21.1-standard-public-form":
     kinetic_source_path = "raw/v211_exec_results.jsonl"
+elif run_profile == "v21.0b-wikipedia-search":
+    kinetic_source_path = "raw/v21b_exec_results.jsonl"
 
 kinetic_delta_ok = True
 if armed is True:

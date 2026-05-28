@@ -16,6 +16,9 @@ let expectedSuccessNeedle = env["GENESIS_V190_EXPECT_SUCCESS_TITLE"] ?? "Verific
 let httpbinFieldNeedle = (env["GENESIS_V190_HTTPBIN_FIELD_LABEL"] ?? "Customer name").lowercased()
 let httpbinCommitNeedle = (env["GENESIS_V190_HTTPBIN_COMMIT_TITLE"] ?? "Submit order").lowercased()
 let httpbinExpectedValue = env["GENESIS_V190_HTTPBIN_EXPECT_VALUE"] ?? "Genesis"
+let searchFieldNeedle = (env["GENESIS_V190_SEARCH_FIELD_TITLE"] ?? "Search Wikipedia").lowercased()
+let searchCommitNeedle = (env["GENESIS_V190_SEARCH_COMMIT_TITLE"] ?? "Search").lowercased()
+let searchQuery = env["GENESIS_V190_SEARCH_QUERY"] ?? "OpenAI"
 let maxDepth = Int(env["GENESIS_V190_AX_MAX_DEPTH"] ?? "14") ?? 14
 let maxNodes = Int(env["GENESIS_V190_AX_MAX_NODES"] ?? "4200") ?? 4200
 
@@ -212,6 +215,8 @@ var queue = [QueueItem(element: selectedWindow, depth: 0, path: [])]
 var visited = 0
 var controls: [[String: Any]] = []
 var triggerCandidates: [[String: Any]] = []
+var searchFieldCandidates: [[String: Any]] = []
+var searchCommitCandidates: [[String: Any]] = []
 var modalCandidates: [[String: Any]] = []
 var isrRiskCandidates: [[String: Any]] = []
 var terminationCandidates: [[String: Any]] = []
@@ -239,6 +244,17 @@ while !queue.isEmpty && visited < maxNodes {
 
         if labelLower.contains(triggerNeedle) {
             triggerCandidates.append(control)
+        }
+        if kind == "text_input"
+            && (labelLower.contains(searchFieldNeedle)
+                || labelLower.contains("search")
+                || labelLower.contains("search wikipedia")) {
+            searchFieldCandidates.append(control)
+        }
+        if (kind == "button" || kind == "pressable")
+            && labelLower.contains(searchCommitNeedle)
+            && !labelLower.contains("advanced") {
+            searchCommitCandidates.append(control)
         }
         if labelLower.contains(expectedSuccessNeedle.lowercased()) {
             terminationCandidates.append(control)
@@ -272,11 +288,13 @@ while !queue.isEmpty && visited < maxNodes {
     }
 }
 
+let selectedTrigger = triggerCandidates.first
+let selectedSearchField = searchFieldCandidates.first
+let selectedSearchCommit = planProfile == "wikipedia_search" ? selectedSearchField : searchCommitCandidates.first
 let controlsByKind = Dictionary(grouping: controls) { ($0["control_kind"] as? String) ?? "unknown" }
 let observedControlTypes = controlsByKind.keys.sorted()
 let modalActive = !modalCandidates.isEmpty
 let domainLocked = targetUrl.contains(domainLock)
-let selectedTrigger = triggerCandidates.first
 let httpbinTextInputs = controls.filter { ($0["control_kind"] as? String) == "text_input" }
 let httpbinSubmitCandidates = controls.filter { control in
     let label = ((control["label"] as? String) ?? "").lowercased()
@@ -321,6 +339,35 @@ if planProfile == "httpbin_standard_form" {
         && !httpbinTextInputs.isEmpty
         && !httpbinSubmitCandidates.isEmpty
         && planSteps.count == 2
+} else if planProfile == "wikipedia_search", let selectedSearchField {
+    planSteps = [
+        [
+            "step_id": "step-0-fill-search-field",
+            "phase": "public_search_text_mutation",
+            "target_label": searchFieldNeedle,
+            "control_type": selectedSearchField["control_kind"] ?? "text_input",
+            "planned_weapon": "v21b_search_textfield_transport",
+            "requires_fresh_remap_before_fire": true,
+            "input_value": searchQuery,
+            "posted": false,
+            "physical_input_posted": false,
+        ],
+        [
+            "step_id": "step-1-submit-search",
+            "phase": "public_search_commit",
+            "target_label": searchCommitNeedle,
+            "control_type": "projected_button",
+            "planned_weapon": "field_focus_suggestion_click",
+            "requires_fresh_remap_before_fire": true,
+            "termination_expectation": "wikipedia_search_result_or_article",
+            "posted": false,
+            "physical_input_posted": false,
+        ],
+    ]
+    safeToArm = domainLocked
+        && selectedSearchCommit != nil
+        && !modalActive
+        && planSteps.count >= 2
 } else if let selectedTrigger {
     planSteps = [
         [
@@ -394,6 +441,13 @@ emit([
         "field_candidate": jsonValue(httpbinTextInputs.first),
         "submit_candidate": jsonValue(httpbinSubmitCandidates.first),
     ],
+    "search_field_found": selectedSearchField != nil,
+    "search_field_candidate_count": searchFieldCandidates.count,
+    "search_field_candidate": jsonValue(selectedSearchField),
+    "search_commit_found": selectedSearchCommit != nil,
+    "search_commit_candidate_count": planProfile == "wikipedia_search" ? (selectedSearchField == nil ? 0 : 1) : searchCommitCandidates.count,
+    "search_commit_candidate": jsonValue(selectedSearchCommit),
+    "search_query": searchQuery,
     "modal_active_on_load": modalActive,
     "public_obstacle_seen": modalActive,
     "isr_prediction": [

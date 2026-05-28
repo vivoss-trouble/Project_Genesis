@@ -26,7 +26,7 @@ WINDOW_TITLE="${GENESIS_V211_WINDOW_TITLE:-httpbin.org}"
 FIELD_LABEL="${GENESIS_V211_FIELD_LABEL:-Customer name}"
 INPUT_VALUE="${GENESIS_V211_INPUT_VALUE:-Genesis}"
 COMMIT_TITLE="${GENESIS_V211_COMMIT_TITLE:-Submit order}"
-POLL_TIMEOUT_MS="${GENESIS_V211_POLL_TIMEOUT_MS:-10000}"
+POLL_TIMEOUT_MS="${GENESIS_V211_POLL_TIMEOUT_MS:-25000}"
 POLL_INTERVAL_MS="${GENESIS_V211_POLL_INTERVAL_MS:-200}"
 ARMED_TOKEN="GENESIS_V211_ARMED_PUBLIC_STANDARD_FORM"
 AUTO_FIRE_TOKEN="GENESIS_V211_AUTO_FIRE_PUBLIC_STANDARD_FORM"
@@ -189,13 +189,13 @@ wait_for_domain_url() {
     local deadline_ms=$(( $(now_ms) + 15000 ))
     while (( $(now_ms) <= deadline_ms )); do
         url="$(current_url || true)"
-        if [[ -n "$url" && "$url" != "missing value" && "$url" == *"$URL_DOMAIN_LOCK"* ]]; then
+        if [[ -n "$url" && "$url" != "missing value" && "$url" == "$TARGET_URL"* ]]; then
             printf '%s\n' "$url"
             return
         fi
         sleep 0.2
     done
-    echo "[v21.1] ERROR: target URL did not stabilize inside domain lock (last: $url)" >&2
+    echo "[v21.1] ERROR: target URL did not stabilize at $TARGET_URL (last: $url)" >&2
     exit 1
 }
 

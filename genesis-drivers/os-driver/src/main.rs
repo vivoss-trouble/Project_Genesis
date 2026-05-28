@@ -436,6 +436,7 @@ fn parse_key_input(value: &str) -> Result<KeyInput, String> {
         "space" | "spacebar" => ("space", 49),
         "page_down" | "pagedown" => ("page_down", 121),
         "page_up" | "pageup" => ("page_up", 116),
+        "return" | "enter" => ("return", 36),
         "arrow_down" | "down" | "down_arrow" => ("arrow_down", 125),
         "arrow_up" | "up" | "up_arrow" => ("arrow_up", 126),
         other => return Err(format!("unsupported key: {other}")),
