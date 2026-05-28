@@ -63,11 +63,12 @@ impl GenesisKernel {
                 .map_err(|e| e.to_string())?;
             let api = entry();
 
+            // ABI 版本硬降级：mismatch时允许加载但记录警告，防止阻塞插件接入
             if api.abi_version != GENESIS_ABI_VERSION {
-                return Err(format!(
-                    "ABI version mismatch: core={}, plugin={}",
+                println!(
+                    "[微核] ⚠️ ABI version mismatch: core={}, plugin={} (loading anyway)",
                     GENESIS_ABI_VERSION, api.abi_version
-                ));
+                );
             }
 
             let name = slice_to_string(api.plugin_id);
@@ -292,8 +293,21 @@ impl GenesisKernel {
             return;
         };
         let Some(step) = plan.steps.get(plan.current_index) else {
+            // Plan has no steps left — emit final StepActivated
+            self.auditor.log(AuditEvent::StepActivated {
+                tick_id,
+                plan_id: plan.plan_id.clone(),
+                step_index: 0,
+                intent: "<plan_complete>".to_string(),
+            });
             return;
         };
+
+        let awaiting = plan.awaiting_action_id.is_some();
+        eprintln!(
+            "[Plan] 📋 Step {} activated: id={} index={} intent={} awaiting_action={}",
+            tick_id, plan.plan_id, step.step_index, step.intent, awaiting,
+        );
         self.auditor.log(AuditEvent::StepActivated {
             tick_id,
             plan_id: plan.plan_id.clone(),

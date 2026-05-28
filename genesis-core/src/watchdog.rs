@@ -1,6 +1,6 @@
 use genesis_contracts::wire::{
-    GENESIS_ABI_VERSION, GENESIS_ERROR_NONE, GENESIS_STATUS_TAINTED, GenesisPayload,
-    GenesisPluginApi, GenesisResponse, GenesisSlice,
+    GENESIS_ABI_VERSION, GENESIS_ERROR_NONE, GENESIS_STATUS_ERROR, GENESIS_STATUS_TAINTED,
+    GenesisPayload, GenesisPluginApi, GenesisResponse, GenesisSlice,
 };
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::thread;
@@ -36,11 +36,24 @@ impl PluginWorker {
                     data: GenesisSlice::from_slice(&request.data),
                 };
 
-                let response = (api_clone.on_event)(payload);
+                // FFI panic 被捕获：不会 unwind stack，而是返回 fallback response
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    (api_clone.on_event)(payload)
+                }));
 
-                if let Err(err) = tx_out.send(response) {
-                    (api_clone.free_response)(err.0);
-                    break;
+                match result {
+                    Ok(response) => {
+                        let _ = tx_out.send(response);
+                    }
+                    Err(panic_payload) => {
+                        eprintln!("[Watchdog] Plugin panic captured: {:?}", panic_payload);
+                        // 构造 fallback response 并尝试发送
+                        let err_resp = GenesisResponse::empty(
+                            GENESIS_STATUS_ERROR,
+                            GENESIS_ERROR_NONE,
+                        );
+                        let _ = tx_out.send(err_resp);
+                    }
                 }
             }
         });

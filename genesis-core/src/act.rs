@@ -11,6 +11,14 @@ use std::thread;
 
 use crate::audit::{AuditEvent, AuditLogger};
 
+fn now_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default()
+}
+
 const ACTUATOR_SOCKET_PATH: &str = "/tmp/genesis_act.sock";
 const DEFAULT_DYNAMIC_ACTUATOR_SOCKET_PATH: &str = "/tmp/genesis_dynamic_act.sock";
 const OS_ACTUATOR_SOCKET_ENV: &str = "GENESIS_OS_ACT_SOCKET";
@@ -135,6 +143,8 @@ pub struct PendingAction {
     pub action_id: String,
     pub dispatched_tick_id: u64,
     pub source_tick_id: u64,
+    #[allow(dead_code)]
+    pub dispatched_at_ms: u64,
     pub action: GenesisAction,
 }
 
@@ -186,6 +196,7 @@ impl ActDispatcher {
                         action_id: action_id.clone(),
                         dispatched_tick_id: tick_id,
                         source_tick_id,
+                        dispatched_at_ms: now_ms(),
                         action: pending_action,
                     });
                 self.auditor.log(AuditEvent::ActionDispatched {
@@ -243,29 +254,49 @@ impl ActDispatcher {
     }
 }
 
+/// 外部 Actuator 执行结果，区分真实发送成功与本地 fallback。
+enum ActuatorDeliveryResult {
+    /// 消息已发送到 UnixSocket（可能是新连接）
+    Sent,
+    /// Socket 不可用：尝试了连接但仍失败
+    LocalFallback(()),
+}
+
 fn execute_action(command: ActionCommand, auditor: &AuditLogger) {
-    if let Err(err) = send_to_external_actuator(&command.action_id, &command.action) {
-        println!("[Actuator] local actuator unavailable: {}", err);
-        auditor.log(AuditEvent::FailureObserved {
-            tick_id: command.tick_id,
-            component: "Actuator".to_string(),
-            error: err,
-        });
-    }
+    // 先执行外部 Actuator，结果绑定到 delivery_result
+    let delivery_result = match send_to_external_actuator(&command.action_id, &command.action) {
+        Ok(()) => ActuatorDeliveryResult::Sent,
+        Err(err) => {
+            println!("[Actuator] ⚠️ local actuator unavailable ({}): {}", command.action_id, err);
+            auditor.log(AuditEvent::FailureObserved {
+                tick_id: command.tick_id,
+                component: "Actuator".to_string(),
+                error: format!("send_to_external_actuator failed for {}: {}", command.action_id, err),
+            });
+            ActuatorDeliveryResult::LocalFallback(())
+        }
+    };
+
+    // match 块现在使用 delivery_result，区分成功和失败
+    let result_suffix = if matches!(delivery_result, ActuatorDeliveryResult::Sent) {
+        " → sent"
+    } else {
+        " → fallback (local)"
+    };
 
     match command.action {
         GenesisAction::Noop { reason } => {
             println!(
-                "[Actuator] noop id={} source_tick={} reason={}",
+                "[Actuator] noop id={} source_tick={} reason={}{result_suffix}",
                 command.action_id,
                 command.source_tick_id,
-                reason.unwrap_or_default()
+                reason.unwrap_or_default(),
             );
         }
         GenesisAction::Click { target, reason } => {
             println!(
-                "[Actuator] click id={} source_tick={} target={} reason={}",
-                command.action_id, command.source_tick_id, target, reason
+                "[Actuator] click id={} source_tick={} target={} reason={}{result_suffix}",
+                command.action_id, command.source_tick_id, target, &reason
             );
         }
         GenesisAction::Type {
@@ -274,14 +305,14 @@ fn execute_action(command: ActionCommand, auditor: &AuditLogger) {
             reason,
         } => {
             println!(
-                "[Actuator] type id={} source_tick={} target={} text={} reason={}",
-                command.action_id, command.source_tick_id, target, text, reason
+                "[Actuator] type id={} source_tick={} target={} text={} reason={}{result_suffix}",
+                command.action_id, command.source_tick_id, target, &text, &reason
             );
         }
         GenesisAction::Key { code, reason } => {
             println!(
-                "[Actuator] key id={} source_tick={} code={} reason={}",
-                command.action_id, command.source_tick_id, code, reason
+                "[Actuator] key id={} source_tick={} code={} reason={}{result_suffix}",
+                command.action_id, command.source_tick_id, code, &reason
             );
         }
         GenesisAction::Wait {
@@ -290,8 +321,8 @@ fn execute_action(command: ActionCommand, auditor: &AuditLogger) {
             reason,
         } => {
             println!(
-                "[Actuator] passive wait id={} source_tick={} ms={} expected={:?} reason={}",
-                command.action_id, command.source_tick_id, ms, expected_state, reason
+                "[Actuator] passive wait id={} source_tick={} ms={} expected={:?} reason={}{result_suffix}",
+                command.action_id, command.source_tick_id, ms, expected_state, &reason
             );
         }
         GenesisAction::ClickPoint {
@@ -302,8 +333,8 @@ fn execute_action(command: ActionCommand, auditor: &AuditLogger) {
             reason,
         } => {
             println!(
-                "[Actuator] click_point id={} source_tick={} target_id={} x={} y={} frame_id={} reason={}",
-                command.action_id, command.source_tick_id, target_id, x, y, frame_id, reason
+                "[Actuator] click_point id={} source_tick={} target_id={} x={} y={} frame_id={} reason={}{result_suffix}",
+                command.action_id, command.source_tick_id, target_id, x, y, frame_id, &reason
             );
         }
         GenesisAction::AssertUiState {
@@ -312,8 +343,8 @@ fn execute_action(command: ActionCommand, auditor: &AuditLogger) {
             reason,
         } => {
             println!(
-                "[Actuator] assert id={} source_tick={} target={} expected={} reason={}",
-                command.action_id, command.source_tick_id, target, expected, reason
+                "[Actuator] assert id={} source_tick={} target={} expected={} reason={}{result_suffix}",
+                command.action_id, command.source_tick_id, target, expected, &reason
             );
         }
     }

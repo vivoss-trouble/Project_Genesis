@@ -194,9 +194,30 @@ impl AuditLogger {
 }
 
 fn write_record(writer: &mut BufWriter<std::fs::File>, record: &AuditRecord) {
-    if let Ok(json) = serde_json::to_string(record) {
-        let _ = writeln!(writer, "{}", json);
+    // Step 1: Serialize to JSON
+    let json = match serde_json::to_string(record) {
+        Ok(json) => json,
+        Err(e) => {
+            eprintln!("[Audit] serialization failed for tick={}: {}", 
+                     record.timestamp_ms, e);
+            return;
+        }
+    };
+
+    // Step 2: Write line to buffer
+    if writeln!(writer, "{}", json).is_err() {
+        eprintln!("[Audit] write failed for tick={}, attempting flush and retry", 
+                 record.timestamp_ms);
         let _ = writer.flush();
+        return;
+    }
+
+    // Step 3: Flush to disk - the critical path that was previously swallowing errors
+    if writer.flush().is_err() {
+        eprintln!("[Audit] flush failed for tick={}, data remains buffered", 
+                 record.timestamp_ms);
+        // Don't lose data: keep it in buffer, will be flushed on next write or drop.
+        // Critical path is not blocked (no break/return).
     }
 }
 

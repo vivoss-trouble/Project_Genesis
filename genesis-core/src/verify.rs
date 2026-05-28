@@ -3,17 +3,17 @@ use serde_json::{Value, json};
 use crate::act::{GenesisAction, WaitExpectedState};
 use crate::audit::VerificationResult;
 
-#[cfg(test)]
-pub fn verify_action(action: &GenesisAction, sense_payload: &str) -> (VerificationResult, Value) {
-    verify_action_inner(None, action, sense_payload)
-}
-
 pub fn verify_pending_action(
     action_id: &str,
     action: &GenesisAction,
     sense_payload: &str,
 ) -> (VerificationResult, Value) {
     verify_action_inner(Some(action_id), action, sense_payload)
+}
+
+#[cfg(test)]
+pub fn verify_action(action: &GenesisAction, sense_payload: &str) -> (VerificationResult, Value) {
+    verify_action_inner(None, action, sense_payload)
 }
 
 fn verify_action_inner(
