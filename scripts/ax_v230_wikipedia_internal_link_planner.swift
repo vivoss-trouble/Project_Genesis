@@ -3,12 +3,13 @@ import ApplicationServices
 import Foundation
 
 let env = ProcessInfo.processInfo.environment
-let bundleIdNeedle = env["GENESIS_V220_BROWSER_BUNDLE_ID"] ?? "com.apple.Safari"
-let browserNameNeedle = (env["GENESIS_V220_BROWSER_APP"] ?? "Safari").lowercased()
-let query = env["GENESIS_V220_SEARCH_QUERY"] ?? "OpenAI"
-let urlDomainLock = env["GENESIS_V220_URL_DOMAIN_LOCK"] ?? "wikipedia.org"
-let maxDepth = Int(env["GENESIS_V220_AX_MAX_DEPTH"] ?? "16") ?? 16
-let maxNodes = Int(env["GENESIS_V220_AX_MAX_NODES"] ?? "8000") ?? 8000
+let bundleIdNeedle = env["GENESIS_V230_BROWSER_BUNDLE_ID"] ?? "com.apple.Safari"
+let browserNameNeedle = (env["GENESIS_V230_BROWSER_APP"] ?? "Safari").lowercased()
+let urlDomainLock = env["GENESIS_V230_URL_DOMAIN_LOCK"] ?? "wikipedia.org"
+let targetText = env["GENESIS_V230_INTERNAL_LINK_TEXT"] ?? "微软"
+let alternateText = env["GENESIS_V230_INTERNAL_LINK_ALT_TEXT"] ?? "Microsoft"
+let maxDepth = Int(env["GENESIS_V230_AX_MAX_DEPTH"] ?? "18") ?? 18
+let maxNodes = Int(env["GENESIS_V230_AX_MAX_NODES"] ?? "10000") ?? 10000
 
 func emit(_ payload: [String: Any]) {
     let data = try! JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
@@ -30,6 +31,7 @@ func stringAttribute(_ element: AXUIElement, _ attribute: String) -> String {
     let (status, value) = copyAttribute(element, attribute)
     guard status == .success, let value else { return "" }
     if let string = value as? String { return string }
+    if let url = value as? URL { return url.absoluteString }
     if let number = value as? NSNumber { return number.stringValue }
     if let bool = value as? Bool { return bool ? "true" : "false" }
     return ""
@@ -78,12 +80,26 @@ func haystack(_ element: AXUIElement) -> String {
         stringAttribute(element, kAXValueAttribute),
     ]
     .joined(separator: " ")
+    .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
     .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func normalized(_ text: String) -> String {
+    text.lowercased().replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func compact(_ text: String) -> String {
+    text.lowercased().replacingOccurrences(of: "[^\\p{L}\\p{N}]+", with: "", options: .regularExpression)
 }
 
 func visibleFrame(_ frame: [String: Double]?) -> Bool {
     guard let frame else { return false }
     return (frame["width"] ?? 0) > 2 && (frame["height"] ?? 0) > 2 && (frame["area"] ?? 0) > 8
+}
+
+func center(_ frame: [String: Double]?) -> [String: Double]? {
+    guard let frame else { return nil }
+    return ["x": frame["center_x"] ?? 0, "y": frame["center_y"] ?? 0]
 }
 
 func shouldDescend(role: String, depth: Int) -> Bool {
@@ -109,18 +125,6 @@ func shouldDescend(role: String, depth: Int) -> Bool {
     ].contains(role)
 }
 
-func textSample(_ text: String, maxCount: Int = 360) -> String {
-    let normalized = text
-        .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-    if normalized.count <= maxCount { return normalized }
-    return String(normalized.prefix(maxCount))
-}
-
-func normalized(_ text: String) -> String {
-    text.lowercased().replacingOccurrences(of: #"[^\p{L}\p{N}]+"#, with: "", options: .regularExpression)
-}
-
 struct QueueItem {
     let element: AXUIElement
     let depth: Int
@@ -138,7 +142,7 @@ let app = NSWorkspace.shared.runningApplications.first { candidate in
 
 guard let app else {
     emit([
-        "event": "v220_wikipedia_result_extraction",
+        "event": "v230_wikipedia_internal_link_plan",
         "status": "error",
         "error": "browser app not running",
         "accessibility_api_trusted": trusted,
@@ -157,7 +161,7 @@ let selectedWindow = windowList.first { window in
 
 guard let selectedWindow else {
     emit([
-        "event": "v220_wikipedia_result_extraction",
+        "event": "v230_wikipedia_internal_link_plan",
         "status": "error",
         "error": "browser window not found",
         "accessibility_api_trusted": trusted,
@@ -185,128 +189,104 @@ while !queue.isEmpty && visited < maxNodes {
 
 let windowTitle = stringAttribute(selectedWindow, kAXTitleAttribute)
 let windowFrame = rectAttribute(selectedWindow, "AXFrame")
-let queryNeedle = normalized(query)
-
-func frameIntersectsWindow(_ frame: [String: Double]?) -> Bool {
-    guard let frame, let windowFrame else { return true }
-    let minY = frame["y"] ?? 0
-    let maxY = minY + (frame["height"] ?? 0)
-    let windowMinY = windowFrame["y"] ?? 0
-    let windowMaxY = windowMinY + (windowFrame["height"] ?? 0)
-    return maxY >= windowMinY && minY <= windowMaxY
-}
-
-let headingCandidates = allItems.compactMap { item -> [String: Any]? in
+let titleFrames = allItems.compactMap { item -> [String: Double]? in
     let role = stringAttribute(item.element, kAXRoleAttribute)
     guard role == "AXHeading" || role == "AXStaticText" else { return nil }
+    let text = haystack(item.element)
+    guard compact(text).contains("openai") else { return nil }
+    let frame = rectAttribute(item.element, "AXFrame")
+    guard visibleFrame(frame) else { return nil }
+    return frame
+}.sorted { ($0["y"] ?? 0) < ($1["y"] ?? 0) }
+let titleBottomY = titleFrames.first.map { ($0["y"] ?? 0) + ($0["height"] ?? 0) } ?? (windowFrame?["y"] ?? 0)
+let windowMinY = windowFrame?["y"] ?? 0
+let windowMaxY = (windowFrame?["y"] ?? 0) + (windowFrame?["height"] ?? 0)
+let windowMinX = windowFrame?["x"] ?? 0
+let windowMaxX = (windowFrame?["x"] ?? 0) + (windowFrame?["width"] ?? 0)
+
+func frameIntersectsWindow(_ frame: [String: Double]?) -> Bool {
+    guard let frame else { return false }
+    let minY = frame["y"] ?? 0
+    let maxY = minY + (frame["height"] ?? 0)
+    let minX = frame["x"] ?? 0
+    let maxX = minX + (frame["width"] ?? 0)
+    return maxY >= windowMinY && minY <= windowMaxY && maxX >= windowMinX && minX <= windowMaxX
+}
+
+func urlFor(_ element: AXUIElement) -> String {
+    for attr in ["AXURL", "AXLinkedUIElements"] {
+        let value = stringAttribute(element, attr)
+        if value.contains("http") { return value }
+    }
+    return ""
+}
+
+let targetCompacts = Set([compact(targetText), compact(alternateText)].filter { !$0.isEmpty })
+let rawCandidates = allItems.compactMap { item -> [String: Any]? in
+    let role = stringAttribute(item.element, kAXRoleAttribute)
+    guard role == "AXLink" else { return nil }
     let frame = rectAttribute(item.element, "AXFrame")
     guard visibleFrame(frame), frameIntersectsWindow(frame) else { return nil }
-    let text = textSample(haystack(item.element), maxCount: 120)
-    guard !text.isEmpty else { return nil }
-    let norm = normalized(text)
-    let containsQuery = !queryNeedle.isEmpty && norm.contains(queryNeedle)
-    let lengthPenalty = abs(text.count - query.count)
-    let y = frame?["y"] ?? 9_999_999
-    let score = (containsQuery ? 10_000.0 : 0.0) - Double(lengthPenalty * 10) - (y / 100.0)
+    let text = haystack(item.element)
+    let compactText = compact(text)
+    guard targetCompacts.contains(compactText) || targetCompacts.contains(where: { compactText.contains($0) }) else { return nil }
+    let url = urlFor(item.element)
+    let domainLocked = url.isEmpty || url.contains(urlDomainLock)
     return [
         "role": role,
         "text": text,
+        "url": url,
+        "domain_locked": domainLocked,
         "frame": jsonValue(frame),
-        "contains_query": containsQuery,
-        "score": score,
+        "point": jsonValue(center(frame)),
         "path": item.path,
-    ]
-}.sorted {
-    (($0["score"] as? Double) ?? 0) > (($1["score"] as? Double) ?? 0)
-}
-
-let selectedHeading = headingCandidates.first
-let selectedHeadingTextCandidate = selectedHeading?["text"] as? String ?? {
-    if windowTitle.lowercased().contains(query.lowercased()) {
-        return windowTitle.components(separatedBy: " - ").first ?? windowTitle
-    }
-    return ""
-}()
-let windowTitleCandidate = windowTitle.lowercased().contains(query.lowercased())
-    ? (windowTitle.components(separatedBy: " - ").first ?? windowTitle)
-    : ""
-let selectedHeadingText = normalized(selectedHeadingTextCandidate).contains(queryNeedle)
-    ? selectedHeadingTextCandidate
-    : (!windowTitleCandidate.isEmpty ? windowTitleCandidate : selectedHeadingTextCandidate)
-let titleAsserted = !selectedHeadingText.isEmpty && normalized(selectedHeadingText).contains(queryNeedle)
-
-let bodyCandidates = allItems.compactMap { item -> [String: Any]? in
-    let role = stringAttribute(item.element, kAXRoleAttribute)
-    guard ["AXStaticText", "AXGroup", "AXTextArea"].contains(role) else { return nil }
-    let frame = rectAttribute(item.element, "AXFrame")
-    guard visibleFrame(frame), frameIntersectsWindow(frame) else { return nil }
-    let text = textSample(haystack(item.element), maxCount: 700)
-    let compactLength = text.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression).count
-    guard compactLength >= 40 else { return nil }
-    let area = frame?["area"] ?? 0
-    let width = frame?["width"] ?? 0
-    let y = frame?["y"] ?? 0
-    let textMass = Double(compactLength)
-    let containsQuery = normalized(text).contains(queryNeedle)
-    let roleBoost = role == "AXStaticText" ? 200.0 : 0.0
-    let score = textMass * 10.0 + min(area / 80.0, 800.0) + min(width / 2.0, 500.0) + roleBoost + (containsQuery ? 600.0 : 0.0) - min(y / 10.0, 250.0)
-    return [
-        "role": role,
-        "text_sample": text,
-        "text_length": compactLength,
-        "contains_query": containsQuery,
-        "frame": jsonValue(frame),
-        "score": score,
-        "path": item.path,
-    ]
-}.sorted {
-    (($0["score"] as? Double) ?? 0) > (($1["score"] as? Double) ?? 0)
-}
-
-let selectedLead = bodyCandidates.first
-let leadTextLength = selectedLead?["text_length"] as? Int ?? 0
-let leadFound = leadTextLength >= 40
-
-let tocCandidates = allItems.compactMap { item -> [String: Any]? in
-    let role = stringAttribute(item.element, kAXRoleAttribute)
-    guard ["AXList", "AXGroup", "AXStaticText"].contains(role) else { return nil }
-    let frame = rectAttribute(item.element, "AXFrame")
-    guard visibleFrame(frame) else { return nil }
-    let text = textSample(haystack(item.element), maxCount: 240)
-    let lower = text.lowercased()
-    guard lower.contains("contents") || lower.contains("目录") || lower.contains("參考") else { return nil }
-    return [
-        "role": role,
-        "text_sample": text,
-        "frame": jsonValue(frame),
-        "path": item.path,
+        "window_y": frame?["center_y"] ?? 0,
+        "after_title": (frame?["center_y"] ?? 0) > titleBottomY,
     ]
 }
 
-let extractionAsserted = titleAsserted && leadFound
+let domainSurvivors = rawCandidates.filter { ($0["domain_locked"] as? Bool) == true }
+let mainContentSurvivors = domainSurvivors.filter { candidate in
+    guard let frame = candidate["frame"] as? [String: Double] else { return false }
+    let centerY = frame["center_y"] ?? 0
+    let centerX = frame["center_x"] ?? 0
+    let afterTitle = centerY > titleBottomY
+    let insideMainColumn = centerX > windowMinX + 180 && centerX < windowMaxX - 120
+    return afterTitle && insideMainColumn
+}
+let fallbackSurvivors = mainContentSurvivors.isEmpty
+    ? domainSurvivors.filter { ($0["after_title"] as? Bool) == true }
+    : mainContentSurvivors
+let sortedSurvivors = fallbackSurvivors.sorted {
+    (($0["window_y"] as? Double) ?? 0) < (($1["window_y"] as? Double) ?? 0)
+}
+let selected = sortedSurvivors.first
+let planReady = selected != nil
 
 emit([
-    "event": "v220_wikipedia_result_extraction",
+    "event": "v230_wikipedia_internal_link_plan",
     "status": "ok",
-    "profile": "v22.0-wikipedia-result-extraction",
+    "profile": "v23.0-wikipedia-multi-hop",
     "accessibility_api_trusted": trusted,
     "browser_bundle_id": app.bundleIdentifier ?? "",
     "browser_localized_name": app.localizedName ?? "",
     "browser_pid": app.processIdentifier,
-    "url_domain_lock": urlDomainLock,
-    "query": query,
     "selected_window_title": windowTitle,
     "window_frame": jsonValue(windowFrame),
-    "result_title_found": titleAsserted,
-    "result_title": selectedHeadingText,
-    "heading_candidates": Array(headingCandidates.prefix(8)),
-    "lead_text_found": leadFound,
-    "lead_text_sample": selectedLead?["text_sample"] ?? "",
-    "lead_text_length": leadTextLength,
-    "lead_candidates": Array(bodyCandidates.prefix(8)),
-    "toc_found": !tocCandidates.isEmpty,
-    "toc_candidates": Array(tocCandidates.prefix(4)),
-    "extraction_asserted": extractionAsserted,
+    "target_text": targetText,
+    "alternate_text": alternateText,
+    "url_domain_lock": urlDomainLock,
+    "candidate_count": rawCandidates.count,
+    "survivor_count": sortedSurvivors.count,
+    "domain_survivor_count": domainSurvivors.count,
+    "main_content_survivor_count": mainContentSurvivors.count,
+    "tie_breaker": "main_content_first_y",
+    "internal_link_plan_ready": planReady,
+    "selected_candidate": selected ?? [:],
+    "selected_point": jsonValue(selected?["point"]),
+    "candidates": Array(rawCandidates.prefix(16)),
+    "survivors": Array(sortedSurvivors.prefix(8)),
+    "title_bottom_y": titleBottomY,
     "visited_count": visited,
     "posted": false,
     "physical_input_posted": false,

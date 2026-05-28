@@ -32,8 +32,12 @@ DRIVER_LOG="${GENESIS_V210B_DRIVER_LOG:-/tmp/genesis_os_driver_v210b.log}"
 PLANNER_BIN="$WORK_DIR/ax_v190_public_task_planner"
 PROBE_BIN="$WORK_DIR/ax_v210b_wikipedia_search_probe"
 EXTRACTOR_BIN="$WORK_DIR/ax_v220_wikipedia_result_extractor"
+INTERNAL_LINK_PLANNER_BIN="$WORK_DIR/ax_v230_wikipedia_internal_link_planner"
 SHADOW_BIN="$WORK_DIR/open_web_shadow_map"
 RESULT_EXTRACTION="${GENESIS_V210B_RESULT_EXTRACTION:-0}"
+INTERNAL_LINK_FOLLOW="${GENESIS_V210B_INTERNAL_LINK_FOLLOW:-0}"
+INTERNAL_LINK_TEXT="${GENESIS_V210B_INTERNAL_LINK_TEXT:-微软}"
+INTERNAL_LINK_ALT_TEXT="${GENESIS_V210B_INTERNAL_LINK_ALT_TEXT:-Microsoft}"
 ARMED_TOKEN="GENESIS_V210B_ARMED_WIKIPEDIA_SEARCH"
 AUTO_FIRE_TOKEN="GENESIS_V210B_AUTO_FIRE_WIKIPEDIA_SEARCH"
 DRIVER_PID=""
@@ -362,9 +366,17 @@ run_probe() {
 }
 
 run_result_extractor() {
-    GENESIS_V220_SEARCH_QUERY="$SEARCH_QUERY" \
+    local extraction_query="${1:-$SEARCH_QUERY}"
+    GENESIS_V220_SEARCH_QUERY="$extraction_query" \
     GENESIS_V220_URL_DOMAIN_LOCK="$URL_DOMAIN_LOCK" \
         "$EXTRACTOR_BIN"
+}
+
+run_internal_link_planner() {
+    GENESIS_V230_INTERNAL_LINK_TEXT="$INTERNAL_LINK_TEXT" \
+    GENESIS_V230_INTERNAL_LINK_ALT_TEXT="$INTERNAL_LINK_ALT_TEXT" \
+    GENESIS_V230_URL_DOMAIN_LOCK="$URL_DOMAIN_LOCK" \
+        "$INTERNAL_LINK_PLANNER_BIN"
 }
 
 set_search_field() {
@@ -504,6 +516,7 @@ manifest = {
     "tool_versions": {
         "run_v210b": "v21.0b",
         "result_extractor": "v22.0" if os.environ.get("GENESIS_V210B_RESULT_EXTRACTION") == "1" else "disabled",
+        "internal_link_planner": "v23.0" if os.environ.get("GENESIS_V210B_INTERNAL_LINK_FOLLOW") == "1" else "disabled",
         "planner": "v19.0",
         "replay_verifier": "v20.2",
         "evidence_schema": "v20.3",
@@ -580,6 +593,9 @@ swiftc scripts/ax_v190_public_task_planner.swift -o "$PLANNER_BIN"
 swiftc scripts/ax_v210b_wikipedia_search_probe.swift -o "$PROBE_BIN"
 if [[ "$RESULT_EXTRACTION" == "1" ]]; then
     swiftc scripts/ax_v220_wikipedia_result_extractor.swift -o "$EXTRACTOR_BIN"
+fi
+if [[ "$INTERNAL_LINK_FOLLOW" == "1" ]]; then
+    swiftc scripts/ax_v230_wikipedia_internal_link_planner.swift -o "$INTERNAL_LINK_PLANNER_BIN"
 fi
 swiftc scripts/open_web_shadow_map.swift -o "$SHADOW_BIN"
 
@@ -1116,6 +1132,224 @@ payload["event"] = "v220_result_extraction"
 payload["url_after_extraction"] = sys.argv[2]
 print(json.dumps(payload, sort_keys=True))
 PY
+    )"
+fi
+
+INTERNAL_LINK_PLAN_PAYLOAD="{}"
+INTERNAL_LINK_PLAN_READY=false
+INTERNAL_LINK_MOVE_JSON="{}"
+INTERNAL_LINK_CLICK_JSON="{}"
+INTERNAL_LINK_CLICK_POSTED=false
+SECOND_BEFORE_URL="$EXTRACTION_URL"
+SECOND_AFTER_URL="$EXTRACTION_URL"
+SECOND_EXTRACTION_PAYLOAD="{}"
+SECOND_EXTRACTION_ASSERTED=false
+if [[ "$INTERNAL_LINK_FOLLOW" == "1" ]]; then
+    INTERNAL_LINK_PLAN_PAYLOAD="$(run_internal_link_planner || printf '{}')"
+    INTERNAL_LINK_PLAN_READY="$(python3 - "$INTERNAL_LINK_PLAN_PAYLOAD" <<'PY'
+import json, sys
+try:
+    payload = json.loads(sys.argv[1])
+except Exception:
+    payload = {}
+print("true" if payload.get("internal_link_plan_ready") is True else "false")
+PY
+)"
+    emit "$(python3 - "$INTERNAL_LINK_PLAN_PAYLOAD" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1]) if sys.argv[1] != "{}" else {}
+payload["event"] = "v230_internal_link_pre_remap"
+print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+PY
+)"
+    write_json "$JSON_DIR/03_step-2-follow-internal-link_pre_remap.json" "$(python3 - "$INTERNAL_LINK_PLAN_PAYLOAD" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1]) if sys.argv[1] != "{}" else {}
+print(json.dumps({
+    "event": "v201_step_pre_remap",
+    "step_index": 3,
+    "step_id": "step-2-follow-internal-link",
+    "source_event": payload,
+    "fresh_remap_done": payload.get("internal_link_plan_ready") is True,
+    "stale_plan_coordinates_used": False,
+}, ensure_ascii=False, sort_keys=True))
+PY
+)"
+    if [[ "$INTERNAL_LINK_PLAN_READY" != "true" ]]; then
+        echo "[v21.0b] ERROR: internal link plan was not ready" >&2
+        exit 21
+    fi
+    link_x="$(json_get "$INTERNAL_LINK_PLAN_PAYLOAD" "selected_point.x")"
+    link_y="$(json_get "$INTERNAL_LINK_PLAN_PAYLOAD" "selected_point.y")"
+    if [[ -z "$link_x" || -z "$link_y" ]]; then
+        echo "[v21.0b] ERROR: missing internal link point" >&2
+        exit 22
+    fi
+    SECOND_BEFORE_URL="$(current_url || true)"
+    INTERNAL_LINK_MOVE_JSON="$(post_action "follow_internal_link" "move" "$link_x" "$link_y" "move_mouse")"
+    emit "$(python3 - "$INTERNAL_LINK_MOVE_JSON" <<'PY'
+import json, sys
+print(json.dumps({"event":"os_driver_move","phase":"follow_internal_link","move":json.loads(sys.argv[1])}, sort_keys=True))
+PY
+)"
+    INTERNAL_LINK_CLICK_JSON="$(post_action "follow_internal_link" "click" "$link_x" "$link_y" "click_point")"
+    INTERNAL_LINK_CLICK_POSTED="$(python3 - "$INTERNAL_LINK_CLICK_JSON" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+print("true" if (payload.get("receipt") or {}).get("posted") is True else "false")
+PY
+)"
+    emit "$(python3 - "$INTERNAL_LINK_CLICK_JSON" <<'PY'
+import json, sys
+print(json.dumps({"event":"os_driver_click","phase":"follow_internal_link","click":json.loads(sys.argv[1])}, sort_keys=True))
+PY
+)"
+    second_deadline_ms=$(( $(now_ms) + POLL_TIMEOUT_MS ))
+    while (( $(now_ms) <= second_deadline_ms )); do
+        SECOND_AFTER_URL="$(current_url || true)"
+        if python3 - "$SECOND_BEFORE_URL" "$SECOND_AFTER_URL" "$URL_DOMAIN_LOCK" "$INTERNAL_LINK_TEXT" "$INTERNAL_LINK_ALT_TEXT" <<'PY'
+import sys
+before, after, domain, target, alt = sys.argv[1:6]
+lower_after = after.lower()
+ok = (
+    after
+    and after != before
+    and domain in after
+    and (
+        target.lower() in lower_after
+        or alt.lower() in lower_after
+        or "%e5%be%ae%e8%bd%af" in lower_after
+    )
+)
+raise SystemExit(0 if ok else 1)
+PY
+        then
+            break
+        fi
+        sleep "$(sleep_ms "$POLL_INTERVAL_MS")"
+    done
+    write_json "$JSON_DIR/03_step-2-follow-internal-link_driver_receipt.json" "$(python3 - "$INTERNAL_LINK_MOVE_JSON" "$INTERNAL_LINK_CLICK_JSON" "$INTERNAL_LINK_PLAN_PAYLOAD" <<'PY'
+import json, sys
+move = json.loads(sys.argv[1])
+click = json.loads(sys.argv[2])
+plan = json.loads(sys.argv[3]) if sys.argv[3] != "{}" else {}
+driver_events = [item for item in [move, click] if item]
+print(json.dumps({
+    "event": "v201_step_driver_receipt",
+    "step_index": 3,
+    "step_id": "step-2-follow-internal-link",
+    "driver_events": driver_events,
+    "driver_event_count": len(driver_events),
+    "internal_link_plan": {
+        "candidate_count": plan.get("candidate_count"),
+        "survivor_count": plan.get("survivor_count"),
+        "tie_breaker": plan.get("tie_breaker"),
+        "selected_candidate": plan.get("selected_candidate"),
+    },
+}, ensure_ascii=False, sort_keys=True))
+PY
+)"
+    write_json "$JSON_DIR/03_step-2-follow-internal-link_post_assert.json" "$(python3 - "$INTERNAL_LINK_CLICK_JSON" "$SECOND_BEFORE_URL" "$SECOND_AFTER_URL" "$URL_DOMAIN_LOCK" "$INTERNAL_LINK_TEXT" "$INTERNAL_LINK_ALT_TEXT" <<'PY'
+import json, sys
+click = json.loads(sys.argv[1])
+before, after, domain, target, alt = sys.argv[2:7]
+click_posted = (click.get("receipt") or {}).get("posted") is True
+lower_after = after.lower()
+url_changed = before != after
+business_state_asserted = (
+    click_posted
+    and url_changed
+    and domain in after
+    and (
+        target.lower() in lower_after
+        or alt.lower() in lower_after
+        or "%e5%be%ae%e8%bd%af" in lower_after
+    )
+)
+print(json.dumps({
+    "event": "v201_step_post_assert",
+    "step_index": 3,
+    "step_id": "step-2-follow-internal-link",
+    "receipt": {
+        "fresh_remap_done": bool(after),
+        "stale_plan_coordinates_used": False,
+        "posted": True,
+        "physical_input_posted": click_posted,
+        "internal_link_click_posted": click_posted,
+        "url_before": before,
+        "url_after": after,
+        "domain_locked": domain in after,
+        "url_changed": url_changed,
+        "business_state_asserted": business_state_asserted,
+    },
+}, ensure_ascii=False, sort_keys=True))
+PY
+)"
+    second_extraction_deadline_ms=$(( $(now_ms) + POLL_TIMEOUT_MS ))
+    while (( $(now_ms) <= second_extraction_deadline_ms )); do
+        SECOND_EXTRACTION_PAYLOAD="$(run_result_extractor "$INTERNAL_LINK_TEXT" || printf '{}')"
+        SECOND_EXTRACTION_ASSERTED="$(python3 - "$SECOND_EXTRACTION_PAYLOAD" "$SECOND_AFTER_URL" "$URL_DOMAIN_LOCK" "$INTERNAL_LINK_TEXT" "$INTERNAL_LINK_ALT_TEXT" <<'PY'
+import json, sys
+try:
+    payload = json.loads(sys.argv[1])
+except Exception:
+    payload = {}
+url, domain, target, alt = sys.argv[2:6]
+title = payload.get("result_title") or ""
+lead = payload.get("lead_text_sample") or ""
+haystack = (title + " " + lead + " " + url).lower()
+ok = (
+    payload.get("extraction_asserted") is True
+    and domain in url
+    and (
+        target.lower() in haystack
+        or alt.lower() in haystack
+        or "%e5%be%ae%e8%bd%af" in url.lower()
+    )
+)
+print("true" if ok else "false")
+PY
+)"
+        if [[ "$SECOND_EXTRACTION_ASSERTED" == "true" ]]; then
+            break
+        fi
+        sleep "$(sleep_ms "$POLL_INTERVAL_MS")"
+    done
+    write_json "$JSON_DIR/04_step-3-second-result-extraction_post_assert.json" "$(python3 - "$SECOND_EXTRACTION_PAYLOAD" "$SECOND_AFTER_URL" "$URL_DOMAIN_LOCK" "$INTERNAL_LINK_TEXT" "$INTERNAL_LINK_ALT_TEXT" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1]) if sys.argv[1] != "{}" else {}
+url, domain, target, alt = sys.argv[2:6]
+title = payload.get("result_title") or ""
+lead = payload.get("lead_text_sample") or ""
+haystack = (title + " " + lead + " " + url).lower()
+extraction_asserted = (
+    payload.get("extraction_asserted") is True
+    and domain in url
+    and (
+        target.lower() in haystack
+        or alt.lower() in haystack
+        or "%e5%be%ae%e8%bd%af" in url.lower()
+    )
+)
+payload.update({
+    "event": "v230_second_result_extraction_post_assert",
+    "url_after_extraction": url,
+    "domain_locked_after_extraction": domain in url,
+    "extraction_asserted": extraction_asserted,
+    "posted": False,
+    "physical_input_posted": False,
+    "os_driver_active": False,
+})
+print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+PY
+)"
+    emit "$(python3 - "$SECOND_EXTRACTION_PAYLOAD" "$SECOND_AFTER_URL" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1]) if sys.argv[1] != "{}" else {}
+payload["event"] = "v230_second_result_extraction"
+payload["url_after_extraction"] = sys.argv[2]
+print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+PY
 )"
 fi
 
@@ -1190,6 +1424,54 @@ print(json.dumps({
 }, sort_keys=True))
 PY
 )"
+if [[ "$INTERNAL_LINK_FOLLOW" == "1" ]]; then
+    SUMMARY_PAYLOAD="$(python3 - "$SUMMARY_PAYLOAD" "$INTERNAL_LINK_PLAN_PAYLOAD" "$INTERNAL_LINK_CLICK_POSTED" "$SECOND_BEFORE_URL" "$SECOND_AFTER_URL" "$SECOND_EXTRACTION_PAYLOAD" "$SECOND_EXTRACTION_ASSERTED" "$INTERNAL_LINK_TEXT" "$INTERNAL_LINK_ALT_TEXT" <<'PY'
+import json, sys
+summary = json.loads(sys.argv[1])
+plan = json.loads(sys.argv[2]) if sys.argv[2] != "{}" else {}
+click_posted = sys.argv[3] == "true"
+before_url, after_url = sys.argv[4:6]
+extraction = json.loads(sys.argv[6]) if sys.argv[6] != "{}" else {}
+second_extraction_asserted = sys.argv[7] == "true"
+target, alt = sys.argv[8:10]
+second_url_changed = before_url != after_url
+second_domain_locked = "wikipedia.org" in after_url
+second_complete = (
+    summary.get("sequence_complete") is True
+    and plan.get("internal_link_plan_ready") is True
+    and click_posted
+    and second_url_changed
+    and second_domain_locked
+    and second_extraction_asserted
+)
+summary.update({
+    "run_profile": "v23.0-wikipedia-multi-hop" if summary.get("run_profile") == "v23.0-wikipedia-multi-hop" else summary.get("run_profile"),
+    "target_sequence_count": 3,
+    "multi_hop_requested": True,
+    "multi_hop_step_count": 2,
+    "first_extraction_asserted": summary.get("result_extraction_asserted") is True,
+    "internal_link_plan_ready": plan.get("internal_link_plan_ready") is True,
+    "internal_link_candidate_count": plan.get("candidate_count"),
+    "internal_link_survivor_count": plan.get("survivor_count"),
+    "internal_link_tie_breaker": plan.get("tie_breaker"),
+    "internal_link_target_text": target,
+    "internal_link_alternate_text": alt,
+    "second_click_posted": click_posted,
+    "second_url_before_click": before_url,
+    "second_url_after_click": after_url,
+    "second_url_changed": second_url_changed,
+    "second_domain_locked_after_click": second_domain_locked,
+    "second_extraction_asserted": second_extraction_asserted,
+    "second_result_url": after_url,
+    "second_result_title": extraction.get("result_title"),
+    "second_result_lead_text_length": extraction.get("lead_text_length"),
+    "sequence_complete": second_complete,
+    "stop_reason": "complete" if second_complete else "v230_multi_hop_assert_failed",
+})
+print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+PY
+)"
+fi
 write_json "$JSON_DIR/99_v20_summary.json" "$SUMMARY_PAYLOAD"
 emit "$SUMMARY_PAYLOAD"
 cp "$RESULTS_LOG" "$RAW_DIR/v21b_exec_results.jsonl"

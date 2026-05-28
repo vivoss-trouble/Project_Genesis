@@ -200,7 +200,7 @@ if armed is True:
         fatal.append({"code": "STEP_COUNT_FATAL", "expected": expected_steps, "actual": len(steps)})
     if not steps:
         fatal.append({"code": "ARMED_STEP_LEDGER_MISSING_FATAL"})
-    if run_profile in {"v21.0b-wikipedia-search", "v22.0-wikipedia-result-extraction"}:
+    if run_profile in {"v21.0b-wikipedia-search", "v22.0-wikipedia-result-extraction", "v23.0-wikipedia-multi-hop"}:
         if summary.get("business_state_asserted") is not True:
             fatal.append({"code": "WIKIPEDIA_SEARCH_ASSERTION_FATAL", "summary": summary})
         if summary.get("domain_locked_after_commit") is not True:
@@ -209,7 +209,7 @@ if armed is True:
             fatal.append({"code": "WIKIPEDIA_SEARCH_CLICK_FATAL", "summary": summary})
         if summary.get("url_changed") is not True:
             fatal.append({"code": "WIKIPEDIA_SEARCH_NAVIGATION_FATAL", "summary": summary})
-        if run_profile == "v22.0-wikipedia-result-extraction":
+        if run_profile in {"v22.0-wikipedia-result-extraction", "v23.0-wikipedia-multi-hop"}:
             extraction_path = "json/03_step-2-result-extraction_post_assert.json"
             if extraction_path not in manifest_files:
                 fatal.append({"code": "WIKIPEDIA_EXTRACTION_LEDGER_MISSING_FATAL", "path": extraction_path})
@@ -224,6 +224,29 @@ if armed is True:
                 fatal.append({"code": "WIKIPEDIA_EXTRACTION_TITLE_FATAL", "summary": summary})
             if not isinstance(summary.get("result_lead_text_length"), int) or summary.get("result_lead_text_length", 0) < 40:
                 fatal.append({"code": "WIKIPEDIA_EXTRACTION_LEAD_FATAL", "summary": summary})
+        if run_profile == "v23.0-wikipedia-multi-hop":
+            second_extraction_path = "json/04_step-3-second-result-extraction_post_assert.json"
+            if summary.get("multi_hop_step_count") != 2:
+                fatal.append({"code": "WIKIPEDIA_MULTI_HOP_COUNT_FATAL", "summary": summary})
+            if summary.get("first_extraction_asserted") is not True:
+                fatal.append({"code": "WIKIPEDIA_FIRST_EXTRACTION_FATAL", "summary": summary})
+            if summary.get("internal_link_plan_ready") is not True:
+                fatal.append({"code": "WIKIPEDIA_INTERNAL_LINK_PLAN_FATAL", "summary": summary})
+            if summary.get("second_click_posted") is not True:
+                fatal.append({"code": "WIKIPEDIA_SECOND_CLICK_FATAL", "summary": summary})
+            if summary.get("second_url_changed") is not True:
+                fatal.append({"code": "WIKIPEDIA_SECOND_NAVIGATION_FATAL", "summary": summary})
+            if summary.get("second_extraction_asserted") is not True:
+                fatal.append({"code": "WIKIPEDIA_SECOND_EXTRACTION_FATAL", "summary": summary})
+            if second_extraction_path not in manifest_files:
+                fatal.append({"code": "WIKIPEDIA_SECOND_EXTRACTION_LEDGER_MISSING_FATAL", "path": second_extraction_path})
+            second_extraction = load_json(pack / second_extraction_path) if (pack / second_extraction_path).exists() else {}
+            if second_extraction.get("extraction_asserted") is not True:
+                fatal.append({
+                    "code": "WIKIPEDIA_SECOND_EXTRACTION_ASSERTION_FATAL",
+                    "summary": summary,
+                    "extraction": second_extraction,
+                })
 else:
     if summary.get("armed") is not False:
         fatal.append({"code": "DRY_RUN_SUMMARY_MISMATCH_FATAL", "summary_armed": summary.get("armed")})
@@ -371,7 +394,7 @@ if not sealed_step_timestamps_available:
 kinetic_source_path = "raw/v16_exec_results.jsonl"
 if run_profile == "v21.1-standard-public-form":
     kinetic_source_path = "raw/v211_exec_results.jsonl"
-elif run_profile in {"v21.0b-wikipedia-search", "v22.0-wikipedia-result-extraction"}:
+elif run_profile in {"v21.0b-wikipedia-search", "v22.0-wikipedia-result-extraction", "v23.0-wikipedia-multi-hop"}:
     kinetic_source_path = "raw/v21b_exec_results.jsonl"
 
 kinetic_delta_ok = True
