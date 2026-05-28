@@ -155,22 +155,29 @@ OSA
 }
 
 current_url() {
-    osascript - "$WINDOW_TITLE" <<'OSA'
+    osascript - "$WINDOW_TITLE" "$URL_DOMAIN_LOCK" <<'OSA'
 on run argv
     set titleNeedle to item 1 of argv
+    set domainNeedle to item 2 of argv
     tell application "Safari"
         if (exists front document) then
             try
                 set frontName to name of front document
                 set frontUrl to URL of front document
-                if frontName contains titleNeedle and frontUrl is not missing value then return frontUrl
+                if frontUrl is not missing value then
+                    if frontUrl contains domainNeedle then return frontUrl
+                    if frontName contains titleNeedle then return frontUrl
+                end if
             end try
         end if
         repeat with candidate in documents
             try
                 set candidateName to name of candidate
                 set candidateUrl to URL of candidate
-                if candidateName contains titleNeedle and candidateUrl is not missing value then return candidateUrl
+                if candidateUrl is not missing value then
+                    if candidateUrl contains domainNeedle then return candidateUrl
+                    if candidateName contains titleNeedle then return candidateUrl
+                end if
             end try
         end repeat
         return ""
