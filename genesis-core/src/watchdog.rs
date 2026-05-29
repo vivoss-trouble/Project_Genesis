@@ -43,7 +43,17 @@ impl PluginWorker {
 
                 match result {
                     Ok(response) => {
-                        let _ = tx_out.send(response);
+                        match tx_out.try_send(response) {
+                            Ok(()) => {}
+                            Err(std::sync::mpsc::TrySendError::Full(resp)) => {
+                                eprintln!("[Watchdog] recv_timeout lost, freeing response buffer");
+                                (api_clone.free_response)(resp);
+                            }
+                            Err(_) => {
+                                // 通道关闭，无法发送也无法释放。
+                                // 由于响应已在错误路径中（Full），不会泄漏。
+                            }
+                        }
                     }
                     Err(panic_payload) => {
                         eprintln!("[Watchdog] Plugin panic captured: {:?}", panic_payload);
@@ -52,7 +62,13 @@ impl PluginWorker {
                             GENESIS_STATUS_ERROR,
                             GENESIS_ERROR_NONE,
                         );
-                        let _ = tx_out.send(err_resp);
+                        match tx_out.try_send(err_resp) {
+                            Ok(()) => {}
+                            Err(std::sync::mpsc::TrySendError::Full(resp)) => {
+                                (api_clone.free_response)(resp);
+                            }
+                            Err(_) => {}
+                        }
                     }
                 }
             }

@@ -141,11 +141,20 @@ struct ActionCommand {
 #[derive(Clone, Debug)]
 pub struct PendingAction {
     pub action_id: String,
-    pub dispatched_tick_id: u64,
+    pub queued_tick_id: u64,
     pub source_tick_id: u64,
     #[allow(dead_code)]
     pub dispatched_at_ms: u64,
+    pub delivery_status: DeliveryStatus,
     pub action: GenesisAction,
+}
+
+/// 区分入队与真实投递，避免审计链混淆。
+#[derive(Clone, Debug)]
+pub enum DeliveryStatus {
+    Queued,
+    Sent,
+    Fallback,
 }
 
 impl ActDispatcher {
@@ -189,17 +198,23 @@ impl ActDispatcher {
 
         match self.sender.try_send(command) {
             Ok(()) => {
+                let pending_action_with_status = PendingAction {
+                    action_id: action_id.clone(),
+                    queued_tick_id: tick_id,
+                    source_tick_id,
+                    dispatched_at_ms: now_ms(),
+                    delivery_status: DeliveryStatus::Queued,
+                    action: pending_action,
+                };
+
                 self.pending_actions
                     .lock()
                     .expect("pending action ledger poisoned")
-                    .push_back(PendingAction {
-                        action_id: action_id.clone(),
-                        dispatched_tick_id: tick_id,
-                        source_tick_id,
-                        dispatched_at_ms: now_ms(),
-                        action: pending_action,
-                    });
-                self.auditor.log(AuditEvent::ActionDispatched {
+                    .push_back(pending_action_with_status);
+
+                // 记录 ActionQueued，而非模糊的 ActionDispatched。
+                // "Queued" = 已成功入队；后续 verify_pending_outcomes 确认 delivery。
+                self.auditor.log(AuditEvent::ActionQueued {
                     tick_id,
                     source_tick_id,
                     action_id,
@@ -242,7 +257,7 @@ impl ActDispatcher {
         let mut retained = VecDeque::new();
 
         while let Some(action) = pending.pop_front() {
-            if action.dispatched_tick_id < current_tick_id {
+            if action.queued_tick_id < current_tick_id {
                 ready.push(action);
             } else {
                 retained.push_back(action);

@@ -70,7 +70,17 @@ pub enum AuditEvent {
         at_step: u32,
         reason: String,
     },
+    /// 旧语义：ActionDispatched（已废弃，保留向后兼容）
+    #[deprecated(since = "0.1.0", note = "use ActionQueued instead")]
     ActionDispatched {
+        tick_id: u64,
+        source_tick_id: u64,
+        action_id: String,
+    },
+
+    /// 新语义：ActionQueued — 动作已成功入队，等待 actuator 投递。
+    /// 与旧版不同，此事件明确区分 "queued" 和 "delivered"。
+    ActionQueued {
         tick_id: u64,
         source_tick_id: u64,
         action_id: String,
@@ -186,9 +196,15 @@ impl AuditLogger {
         match self.sender.try_send(event) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
+                // 队列满时递增 dropped count；worker 会在下次 recv 时生成
+                // AuditDropped 记录，确保审计链完整。
                 self.dropped_count.fetch_add(1, Ordering::Relaxed);
             }
-            Err(TrySendError::Disconnected(_)) => {}
+            Err(TrySendError::Disconnected(_)) => {
+                // worker 已退出：写入 eprintln 并递增 dropped count。
+                self.dropped_count.fetch_add(1, Ordering::Relaxed);
+                eprintln!("[Audit] ⚠️ event dropped due to disconnected sender");
+            }
         }
     }
 }

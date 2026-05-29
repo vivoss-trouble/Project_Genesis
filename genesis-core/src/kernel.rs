@@ -63,12 +63,12 @@ impl GenesisKernel {
                 .map_err(|e| e.to_string())?;
             let api = entry();
 
-            // ABI 版本硬降级：mismatch时允许加载但记录警告，防止阻塞插件接入
+            // ABI 版本硬门：mismatch 时拒绝加载，防止 C ABI 不变量被破坏导致 UBO。
             if api.abi_version != GENESIS_ABI_VERSION {
-                println!(
-                    "[微核] ⚠️ ABI version mismatch: core={}, plugin={} (loading anyway)",
+                return Err(format!(
+                    "unsupported ABI version: core={}, plugin={}",
                     GENESIS_ABI_VERSION, api.abi_version
-                );
+                ));
             }
 
             let name = slice_to_string(api.plugin_id);
@@ -151,7 +151,7 @@ impl GenesisKernel {
                 verify_pending_action(&pending.action_id, &pending.action, payload);
             println!(
                 "[Verifier] 🔎 action={} dispatched_tick={} result={:?}",
-                pending.action_id, pending.dispatched_tick_id, result
+                pending.action_id, pending.queued_tick_id, result
             );
             if let Some(outcome) = failed_outcome_payload(tick_id, &pending, &result, &evidence) {
                 latest_failure = Some(outcome);
@@ -163,7 +163,7 @@ impl GenesisKernel {
                 tick_id,
                 action_id: pending.action_id,
                 source_tick_id: pending.source_tick_id,
-                dispatched_tick_id: pending.dispatched_tick_id,
+                dispatched_tick_id: pending.queued_tick_id,
                 result,
                 evidence,
             });
@@ -328,7 +328,7 @@ fn failed_outcome_payload(
         VerificationResult::Failed { reason } => Some(serde_json::json!({
             "action_id": pending.action_id,
             "source_tick_id": pending.source_tick_id,
-            "dispatched_tick_id": pending.dispatched_tick_id,
+            "dispatched_tick_id": pending.queued_tick_id,
             "observed_tick_id": tick_id,
             "status": "Failed",
             "reason": reason,
@@ -338,7 +338,7 @@ fn failed_outcome_payload(
         VerificationResult::Timeout => Some(serde_json::json!({
             "action_id": pending.action_id,
             "source_tick_id": pending.source_tick_id,
-            "dispatched_tick_id": pending.dispatched_tick_id,
+            "dispatched_tick_id": pending.queued_tick_id,
             "observed_tick_id": tick_id,
             "status": "Timeout",
             "reason": "verification_timeout",
