@@ -86,6 +86,8 @@ Implemented in `genesis-plugin-sdk`:
 - `genesis-wasm-plugin-runner` integration tests dynamically compile a real `genesis-plugin-sdk` guest fixture to `wasm32-wasip1` in an isolated temporary workspace and target directory.
 - The real fixture covers echo, business error, panic, and memory pressure branches.
 - The runner does not provide WASI imports. It only whitelists a pure `env.memcmp` helper needed by the current no-std Rust guest output; the helper can only read guest linear memory.
+- `genesis-plugins/plugin-dummy-wasm` ports the native dummy plugin behavior to the SDK as the first real Wasm plugin migration target.
+- `genesis-wasm-plugin-runner/tests/dummy_wasm_plugin.rs` compiles that real plugin to `wasm32-wasip1` and verifies normal response, business error, and panic isolation through the host sandbox.
 
 The first implementation deliberately does not use Component Model / WIT. That path remains a future `ComponentModelTransport` candidate behind the same `WasmPluginTransport` trait.
 

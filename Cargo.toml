@@ -26,6 +26,7 @@ members = [
     "genesis-plugin-sdk",
     "genesis-wasm-plugin-runner",
     "genesis-plugins/plugin-dummy",
+    "genesis-plugins/plugin-dummy-wasm",
     "genesis-plugins/anchor-mmap",
     "genesis-plugins/brain-llm",
     "genesis-daemons/llm-dummy",
