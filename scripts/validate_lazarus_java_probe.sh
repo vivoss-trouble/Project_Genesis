@@ -37,8 +37,8 @@ import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     manifest = json.load(fh)
-if manifest["accepted_count"] < 1:
-    raise SystemExit(f"expected at least one accepted Java probe snapshot: {manifest}")
+if manifest["accepted_count"] < 3:
+    raise SystemExit(f"expected at least three accepted Java probe snapshots: {manifest}")
 if manifest["rejected_count"] != 0:
     raise SystemExit(f"expected zero rejected Java probe snapshots: {manifest}")
 PY
@@ -48,10 +48,10 @@ import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     report = json.load(fh)
-if report["total_snapshots"] < 1:
-    raise SystemExit(f"expected at least one reported snapshot: {report}")
-if report["valid_ingestable_count"] < 1:
-    raise SystemExit(f"expected at least one valid reported snapshot: {report}")
+if report["total_snapshots"] < 3:
+    raise SystemExit(f"expected at least three reported snapshots: {report}")
+if report["valid_ingestable_count"] < 3:
+    raise SystemExit(f"expected at least three valid reported snapshots: {report}")
 if report["missing_trace_tag_count"] != 0:
     raise SystemExit(f"expected Java probe snapshots to include business_method trace tags: {report}")
 if report["method_count"] < 1:

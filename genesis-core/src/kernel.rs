@@ -15,7 +15,7 @@ use std::fs;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::act::{ActDispatcher, BrainActionEnvelope};
-use crate::audit::{AuditEvent, AuditLogger, PlanStep, VerificationResult};
+use crate::audit::{AuditEvent, AuditHealth, AuditLogger, PlanStep, VerificationResult};
 use crate::verify::verify_pending_action;
 use crate::watchdog::PluginWorker;
 
@@ -84,6 +84,10 @@ impl GenesisKernel {
         self.wasm_plugins
             .insert(path.to_string(), LoadedWasmPlugin { name, transport });
         Ok(())
+    }
+
+    pub fn audit_health(&self) -> AuditHealth {
+        self.auditor.health()
     }
 
     pub fn load_plugin(&mut self, path: &str) -> Result<(), String> {

@@ -1,0 +1,42 @@
+name: Release Candidate
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release-candidate:
+    name: Strict release gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - name: Validate required release secrets
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+          LAZARUS_LM_ENDPOINT: ${{ secrets.LAZARUS_LM_ENDPOINT }}
+          LAZARUS_LM_MODEL: ${{ secrets.LAZARUS_LM_MODEL }}
+        run: |
+          test -n "$NVD_API_KEY" || { echo "NVD_API_KEY is required for release validation" >&2; exit 2; }
+          test -n "$LAZARUS_LM_ENDPOINT" || { echo "LAZARUS_LM_ENDPOINT is required for release validation" >&2; exit 2; }
+          test -n "$LAZARUS_LM_MODEL" || { echo "LAZARUS_LM_MODEL is required for release validation" >&2; exit 2; }
+      - name: Run strict release validation
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+          LAZARUS_LM_ENDPOINT: ${{ secrets.LAZARUS_LM_ENDPOINT }}
+          LAZARUS_LM_MODEL: ${{ secrets.LAZARUS_LM_MODEL }}
+          LAZARUS_ORACLE_PROTOCOL: ${{ vars.LAZARUS_ORACLE_PROTOCOL || 'openai_chat' }}
+          LAZARUS_ORACLE_API_KEY: ${{ secrets.LAZARUS_ORACLE_API_KEY }}
+          LAZARUS_ORACLE_TIMEOUT_MS: "120000"
+          LAZARUS_STRESS_ITERATIONS: "100"
+        run: bash scripts/validate_lazarus_release_candidate.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lazarus-release-evidence
+          path: target/lazarus-release-evidence
+          if-no-files-found: error

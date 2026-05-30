@@ -132,7 +132,9 @@ fn main() {
             tick_id: tick,
             state_json: payload.clone(),
         });
+        let audit_health = guard.audit_health();
         println!("\n🫀 [微核脉冲] 正在向插件发射: {}", payload);
+        println!("[微核健康] audit={:?}", audit_health);
 
         guard.trigger_all(tick, &payload);
     }

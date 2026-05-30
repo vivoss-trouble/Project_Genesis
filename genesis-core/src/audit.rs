@@ -140,6 +140,35 @@ pub struct AuditRecord {
 pub struct AuditLogger {
     sender: SyncSender<AuditEvent>,
     dropped_count: Arc<AtomicU64>,
+    health: Arc<AuditHealthCounters>,
+}
+
+#[derive(Default)]
+struct AuditHealthCounters {
+    queued_events: AtomicU64,
+    dropped_events: AtomicU64,
+    disconnected_drops: AtomicU64,
+    serialized_records: AtomicU64,
+    serialization_failures: AtomicU64,
+    write_failures: AtomicU64,
+    flush_failures: AtomicU64,
+    rotation_count: AtomicU64,
+    rotation_failures: AtomicU64,
+    reopen_failures: AtomicU64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditHealth {
+    pub queued_events: u64,
+    pub dropped_events: u64,
+    pub disconnected_drops: u64,
+    pub serialized_records: u64,
+    pub serialization_failures: u64,
+    pub write_failures: u64,
+    pub flush_failures: u64,
+    pub rotation_count: u64,
+    pub rotation_failures: u64,
+    pub reopen_failures: u64,
 }
 
 impl AuditLogger {
@@ -147,6 +176,8 @@ impl AuditLogger {
         let (sender, receiver) = sync_channel::<AuditEvent>(capacity);
         let dropped_count = Arc::new(AtomicU64::new(0));
         let worker_dropped_count = dropped_count.clone();
+        let health = Arc::new(AuditHealthCounters::default());
+        let worker_health = health.clone();
         let audit_path = audit_log_path();
         let audit_max_bytes = audit_max_bytes();
 
@@ -163,16 +194,26 @@ impl AuditLogger {
                             timestamp_ms: current_ts(),
                             event: AuditEvent::AuditDropped { count: dropped },
                         };
-                        rotate_audit_if_needed(&audit_path, audit_max_bytes, &mut writer);
-                        write_record(&mut writer, &record);
+                        rotate_audit_if_needed(
+                            &audit_path,
+                            audit_max_bytes,
+                            &mut writer,
+                            &worker_health,
+                        );
+                        write_record(&mut writer, &record, &worker_health);
                     }
 
                     let record = AuditRecord {
                         timestamp_ms: current_ts(),
                         event,
                     };
-                    rotate_audit_if_needed(&audit_path, audit_max_bytes, &mut writer);
-                    write_record(&mut writer, &record);
+                    rotate_audit_if_needed(
+                        &audit_path,
+                        audit_max_bytes,
+                        &mut writer,
+                        &worker_health,
+                    );
+                    write_record(&mut writer, &record, &worker_health);
                 }
             })
             .expect("无法启动审计线程");
@@ -180,6 +221,7 @@ impl AuditLogger {
         let logger = Self {
             sender,
             dropped_count,
+            health,
         };
 
         if let Some(path) = capture_anchor_snapshot() {
@@ -194,17 +236,39 @@ impl AuditLogger {
 
     pub fn log(&self, event: AuditEvent) {
         match self.sender.try_send(event) {
-            Ok(()) => {}
+            Ok(()) => {
+                self.health.queued_events.fetch_add(1, Ordering::Relaxed);
+            }
             Err(TrySendError::Full(_)) => {
                 // 队列满时递增 dropped count；worker 会在下次 recv 时生成
                 // AuditDropped 记录，确保审计链完整。
                 self.dropped_count.fetch_add(1, Ordering::Relaxed);
+                self.health.dropped_events.fetch_add(1, Ordering::Relaxed);
             }
             Err(TrySendError::Disconnected(_)) => {
                 // worker 已退出：写入 eprintln 并递增 dropped count。
                 self.dropped_count.fetch_add(1, Ordering::Relaxed);
+                self.health.dropped_events.fetch_add(1, Ordering::Relaxed);
+                self.health
+                    .disconnected_drops
+                    .fetch_add(1, Ordering::Relaxed);
                 eprintln!("[Audit] ⚠️ event dropped due to disconnected sender");
             }
+        }
+    }
+
+    pub fn health(&self) -> AuditHealth {
+        AuditHealth {
+            queued_events: self.health.queued_events.load(Ordering::Relaxed),
+            dropped_events: self.health.dropped_events.load(Ordering::Relaxed),
+            disconnected_drops: self.health.disconnected_drops.load(Ordering::Relaxed),
+            serialized_records: self.health.serialized_records.load(Ordering::Relaxed),
+            serialization_failures: self.health.serialization_failures.load(Ordering::Relaxed),
+            write_failures: self.health.write_failures.load(Ordering::Relaxed),
+            flush_failures: self.health.flush_failures.load(Ordering::Relaxed),
+            rotation_count: self.health.rotation_count.load(Ordering::Relaxed),
+            rotation_failures: self.health.rotation_failures.load(Ordering::Relaxed),
+            reopen_failures: self.health.reopen_failures.load(Ordering::Relaxed),
         }
     }
 }
@@ -234,28 +298,44 @@ fn open_audit_writer(path: &Path) -> std::io::Result<BufWriter<std::fs::File>> {
         .map(BufWriter::new)
 }
 
-fn rotate_audit_if_needed(path: &Path, max_bytes: u64, writer: &mut BufWriter<std::fs::File>) {
+fn rotate_audit_if_needed(
+    path: &Path,
+    max_bytes: u64,
+    writer: &mut BufWriter<std::fs::File>,
+    health: &AuditHealthCounters,
+) {
     let Ok(metadata) = writer.get_ref().metadata() else {
+        health.rotation_failures.fetch_add(1, Ordering::Relaxed);
         return;
     };
     if metadata.len() < max_bytes {
         return;
     }
     if writer.flush().is_err() {
+        health.flush_failures.fetch_add(1, Ordering::Relaxed);
+        health.rotation_failures.fetch_add(1, Ordering::Relaxed);
         eprintln!("[Audit] flush failed before log rotation");
         return;
     }
     let Some(rotated_path) = next_rotated_audit_path(path) else {
+        health.rotation_failures.fetch_add(1, Ordering::Relaxed);
         eprintln!("[Audit] unable to allocate rotated audit path");
         return;
     };
     if let Err(error) = fs::rename(path, &rotated_path) {
+        health.rotation_failures.fetch_add(1, Ordering::Relaxed);
         eprintln!("[Audit] rotation rename failed: {error}");
         return;
     }
     match open_audit_writer(path) {
-        Ok(next_writer) => *writer = next_writer,
-        Err(error) => eprintln!("[Audit] reopen after rotation failed: {error}"),
+        Ok(next_writer) => {
+            *writer = next_writer;
+            health.rotation_count.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(error) => {
+            health.reopen_failures.fetch_add(1, Ordering::Relaxed);
+            eprintln!("[Audit] reopen after rotation failed: {error}");
+        }
     }
 }
 
@@ -282,11 +362,18 @@ fn next_rotated_audit_path(path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn write_record(writer: &mut BufWriter<std::fs::File>, record: &AuditRecord) {
+fn write_record(
+    writer: &mut BufWriter<std::fs::File>,
+    record: &AuditRecord,
+    health: &AuditHealthCounters,
+) {
     // Step 1: Serialize to JSON
     let json = match serde_json::to_string(record) {
         Ok(json) => json,
         Err(e) => {
+            health
+                .serialization_failures
+                .fetch_add(1, Ordering::Relaxed);
             eprintln!(
                 "[Audit] serialization failed for tick={}: {}",
                 record.timestamp_ms, e
@@ -297,6 +384,7 @@ fn write_record(writer: &mut BufWriter<std::fs::File>, record: &AuditRecord) {
 
     // Step 2: Write line to buffer
     if writeln!(writer, "{}", json).is_err() {
+        health.write_failures.fetch_add(1, Ordering::Relaxed);
         eprintln!(
             "[Audit] write failed for tick={}, attempting flush and retry",
             record.timestamp_ms
@@ -307,6 +395,7 @@ fn write_record(writer: &mut BufWriter<std::fs::File>, record: &AuditRecord) {
 
     // Step 3: Flush to disk - the critical path that was previously swallowing errors
     if writer.flush().is_err() {
+        health.flush_failures.fetch_add(1, Ordering::Relaxed);
         eprintln!(
             "[Audit] flush failed for tick={}, data remains buffered",
             record.timestamp_ms
@@ -314,6 +403,7 @@ fn write_record(writer: &mut BufWriter<std::fs::File>, record: &AuditRecord) {
         // Don't lose data: keep it in buffer, will be flushed on next write or drop.
         // Critical path is not blocked (no break/return).
     }
+    health.serialized_records.fetch_add(1, Ordering::Relaxed);
 }
 
 fn current_ts() -> u64 {
@@ -349,16 +439,18 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let path = root.join("audit.jsonl");
         let mut writer = open_audit_writer(&path).unwrap();
+        let health = AuditHealthCounters::default();
         writeln!(writer, "{{\"seed\":true}}").unwrap();
         writer.flush().unwrap();
 
-        rotate_audit_if_needed(&path, 1, &mut writer);
+        rotate_audit_if_needed(&path, 1, &mut writer, &health);
         write_record(
             &mut writer,
             &AuditRecord {
                 timestamp_ms: 1,
                 event: AuditEvent::AuditDropped { count: 1 },
             },
+            &health,
         );
 
         let active_body = fs::read_to_string(&path).unwrap();
@@ -373,6 +465,20 @@ mod tests {
             })
             .count();
         assert_eq!(rotated_count, 1);
+        assert_eq!(health.rotation_count.load(Ordering::Relaxed), 1);
+        assert_eq!(health.serialized_records.load(Ordering::Relaxed), 1);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exposes_audit_health_counters() {
+        let logger = AuditLogger::new(1);
+        logger.log(AuditEvent::TickStarted { tick_id: 1 });
+
+        let health = logger.health();
+
+        assert_eq!(health.queued_events, 1);
+        assert_eq!(health.dropped_events, 0);
+        assert_eq!(health.disconnected_drops, 0);
     }
 }
