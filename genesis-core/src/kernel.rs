@@ -9,12 +9,12 @@ use genesis_wasm_plugin_runner::{
     LinearMemoryTransport, PluginError as WasmPluginError, WasmPluginLimits, WasmPluginTransport,
 };
 use libloading::{Library, Symbol};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::act::{ActDispatcher, BrainActionEnvelope};
+use crate::act::{ActDispatcher, ActHealth, BrainActionEnvelope};
 use crate::audit::{AuditEvent, AuditHealth, AuditLogger, PlanStep, VerificationResult};
 use crate::verify::verify_pending_action;
 use crate::watchdog::PluginWorker;
@@ -39,6 +39,18 @@ pub struct GenesisKernel {
     act_dispatcher: ActDispatcher,
     auditor: AuditLogger,
     active_plan: Option<ActivePlan>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KernelHealth {
+    pub native_plugin_count: usize,
+    pub wasm_plugin_count: usize,
+    pub retired_plugin_count: usize,
+    pub active_plan_id: Option<String>,
+    pub active_plan_step_index: Option<u32>,
+    pub active_plan_awaiting_action: bool,
+    pub act: ActHealth,
+    pub audit: AuditHealth,
 }
 
 struct ActivePlan {
@@ -86,8 +98,21 @@ impl GenesisKernel {
         Ok(())
     }
 
-    pub fn audit_health(&self) -> AuditHealth {
-        self.auditor.health()
+    pub fn health(&self) -> KernelHealth {
+        let active_plan = self.active_plan.as_ref();
+        KernelHealth {
+            native_plugin_count: self.plugins.len(),
+            wasm_plugin_count: self.wasm_plugins.len(),
+            retired_plugin_count: self.retired_plugins.len(),
+            active_plan_id: active_plan.map(|plan| plan.plan_id.clone()),
+            active_plan_step_index: active_plan
+                .and_then(|plan| plan.steps.get(plan.current_index))
+                .map(|step| step.step_index),
+            active_plan_awaiting_action: active_plan
+                .is_some_and(|plan| plan.awaiting_action_id.is_some()),
+            act: self.act_dispatcher.health(),
+            audit: self.auditor.health(),
+        }
     }
 
     pub fn load_plugin(&mut self, path: &str) -> Result<(), String> {
@@ -816,6 +841,11 @@ mod tests {
         kernel
             .load_wasm_plugin(wasm_path.to_str().expect("utf-8 fixture path"))
             .expect("load wasm plugin");
+        let health = kernel.health();
+        assert_eq!(health.native_plugin_count, 0);
+        assert_eq!(health.wasm_plugin_count, 1);
+        assert_eq!(health.retired_plugin_count, 0);
+        assert!(health.active_plan_id.is_none());
         kernel.trigger_all(42, "core-wasm-payload");
     }
 

@@ -136,6 +136,12 @@ pub struct ActDispatcher {
     pending_actions: Arc<Mutex<VecDeque<PendingAction>>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActHealth {
+    pub pending_actions: usize,
+    pub next_sequence: u64,
+}
+
 struct ActionCommand {
     action_id: String,
     tick_id: u64,
@@ -325,6 +331,18 @@ impl ActDispatcher {
 
         *pending = retained;
         ready
+    }
+
+    pub fn health(&self) -> ActHealth {
+        let pending_actions = self
+            .pending_actions
+            .lock()
+            .map(|pending| pending.len())
+            .unwrap_or_default();
+        ActHealth {
+            pending_actions,
+            next_sequence: self.next_sequence.load(Ordering::Relaxed),
+        }
     }
 }
 
