@@ -76,6 +76,14 @@ Implemented in `genesis-wasm-plugin-runner`:
 - Wasmtime fuel accounting and store memory limits through `StoreLimits`.
 - Fatal trap handling that discards the instance and returns a `FatalPluginCrash` audit payload.
 
+Implemented in `genesis-plugin-sdk`:
+
+- Shared Host/Guest envelope types: `PluginRequest`, `PluginResponse`, `PluginStatus`, and `PluginError`.
+- `GenesisPlugin` trait for guest business logic.
+- `export_plugin!(Type)` macro that emits the required C ABI exports.
+- SDK-owned guest allocation/deallocation helpers that keep raw pointer handling out of plugin business code.
+- Business errors are serialized as normal `PluginResponse::Error`; panics are not caught and remain host-side fatal traps.
+
 The first implementation deliberately does not use Component Model / WIT. That path remains a future `ComponentModelTransport` candidate behind the same `WasmPluginTransport` trait.
 
 ## Non-Goals

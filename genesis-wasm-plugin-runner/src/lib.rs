@@ -1,63 +1,10 @@
+use genesis_plugin_sdk::{GENESIS_WASM_PLUGIN_API_VERSION, PluginRequest, PluginResponse};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use std::fmt;
 use wasmtime::{Config, Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder, Trap};
 
-pub const GENESIS_WASM_PLUGIN_API_VERSION: u32 = 1;
 const WASM_PAGE_BYTES: usize = 64 * 1024;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginRequest {
-    pub schema_version: u32,
-    pub plugin_id: String,
-    pub request_id: String,
-    pub payload_hash: String,
-    pub payload: Value,
-}
-
-impl PluginRequest {
-    pub fn new(
-        plugin_id: impl Into<String>,
-        request_id: impl Into<String>,
-        payload: Value,
-    ) -> Result<Self, PluginError> {
-        let payload_hash = stable_json_hash(&payload)?;
-        Ok(Self {
-            schema_version: GENESIS_WASM_PLUGIN_API_VERSION,
-            plugin_id: plugin_id.into(),
-            request_id: request_id.into(),
-            payload_hash,
-            payload,
-        })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginStatus {
-    Ok,
-    Error,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginResponse {
-    pub schema_version: u32,
-    pub status: PluginStatus,
-    pub error_code: Option<String>,
-    pub data: Value,
-}
-
-impl PluginResponse {
-    pub fn ok(data: Value) -> Self {
-        Self {
-            schema_version: GENESIS_WASM_PLUGIN_API_VERSION,
-            status: PluginStatus::Ok,
-            error_code: None,
-            data,
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WasmPluginLimits {
@@ -419,12 +366,6 @@ fn ensure_guest_range(
 
 fn unpack_ptr_len(value: u64) -> (u32, u32) {
     ((value >> 32) as u32, (value & 0xffff_ffff) as u32)
-}
-
-fn stable_json_hash(value: &Value) -> Result<String, PluginError> {
-    let bytes =
-        serde_json::to_vec(value).map_err(|error| PluginError::Serialization(error.to_string()))?;
-    Ok(hex_sha256(&bytes))
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {

@@ -706,6 +706,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "genesis-plugin-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "genesis-replay"
 version = "0.1.0"
 dependencies = [
@@ -719,6 +728,7 @@ dependencies = [
 name = "genesis-wasm-plugin-runner"
 version = "0.1.0"
 dependencies = [
+ "genesis-plugin-sdk",
  "serde",
  "serde_json",
  "sha2",
