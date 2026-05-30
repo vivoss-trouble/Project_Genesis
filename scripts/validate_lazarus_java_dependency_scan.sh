@@ -31,5 +31,6 @@ docker run --rm \
   mvn -B "org.owasp:dependency-check-maven:${DEPENDENCY_CHECK_VERSION}:check" \
     "-DdataDirectory=/dependency-check-data" \
     "-DfailBuildOnCVSS=${FAIL_ON_CVSS}" \
-    "-Dformat=HTML,JSON" \
+    "-Dformat=JSON" \
+    "-DretireJsAnalyzerEnabled=false" \
     "${NVD_ARGS[@]}"
