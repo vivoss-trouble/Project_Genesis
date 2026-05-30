@@ -66,6 +66,23 @@ Release validation is expected to fail if the repository contains unstaged sourc
 
 The release wrapper deliberately checks git cleanliness before expensive external gates. This prevents a dirty local run from being mistaken for release evidence.
 
+## NVD Connectivity Probe
+
+Use this before coupling NVD-backed dependency scanning to long-running stress:
+
+```sh
+NVD_API_KEY=... bash scripts/validate_nvd_connectivity.sh
+```
+
+The probe sends one CVE API request and classifies the result:
+
+- exit `0`: connectivity and response shape are valid.
+- exit `2`: missing API key unless `ALLOW_UNKEYED_NVD=1`.
+- exit `3`: NVD returned HTTP 429 rate limiting.
+- exit `4`: unexpected non-200 response.
+
+This script is intentionally separate from lifecycle stress so network rate limits cannot be misdiagnosed as local deadlock or memory pressure.
+
 ## Non-Negotiables
 
 - `default` proves local engineering health, not production readiness.
