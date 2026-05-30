@@ -39,6 +39,7 @@ This addendum updates the architecture/source refactor report after the latest a
 bash scripts/validate_all.sh
 LAZARUS_STRESS_ITERATIONS=1 bash scripts/validate_lazarus_pilot_gate.sh
 RUN_LOCAL_LM_SMOKE=1 LAZARUS_LM_MODEL='huihui-ai/qwen/claude-4.7-opus--q8_0.gguf' bash scripts/validate_all.sh
+LAZARUS_STRESS_ITERATIONS=100 bash scripts/validate_lazarus_stress.sh
 ```
 
 The release candidate wrapper was also executed and correctly failed fast because the git worktree is not clean:
@@ -55,8 +56,12 @@ Remaining blockers:
 
 1. The worktree is still not a frozen clean baseline.
 2. Java CVE scanning is wired but has not completed with a real `NVD_API_KEY` in this run.
-3. Long stress has not been run at the release default of `LAZARUS_STRESS_ITERATIONS=100`.
-4. CLI and Synthesizer module split remains a maintainability task.
+3. CLI and Synthesizer module split remains a maintainability task.
+
+Newly closed since the original addendum:
+
+- `LAZARUS_STRESS_ITERATIONS=100 bash scripts/validate_lazarus_stress.sh` completed successfully.
+- `scripts/validate_nvd_connectivity.sh` completed an exploratory unkeyed one-request NVD probe for `CVE-2021-44228`; release dependency scanning still requires a real `NVD_API_KEY`.
 
 ## Updated Rating
 
@@ -69,4 +74,4 @@ Remaining blockers:
 
 Default engineering gates are closed, pilot gates are executable, local LM synthesis has a live successful sample, and native production misuse is blocked by default.
 
-The next non-negotiable release step is not more architecture expansion. It is freezing the source baseline, running the Java CVE gate with `NVD_API_KEY`, running the release stress profile, and preserving the local LM smoke artifacts as release evidence.
+The next non-negotiable release step is not more architecture expansion. It is preserving the source baseline, running the Java CVE gate with `NVD_API_KEY`, and preserving the local LM smoke artifacts as release evidence.
