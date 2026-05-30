@@ -10,6 +10,12 @@ This document describes the runtime isolation boundary that is implemented by th
 
 `genesis-core` loads `.so` / `.dylib` plugins through `libloading` and a C ABI entrypoint. These plugins run inside the `genesis-core` process.
 
+Runtime gate:
+
+- Native `.so` / `.dylib` loading is disabled by default.
+- Set `GENESIS_ALLOW_NATIVE_PLUGINS=1` only when loading trusted local plugins.
+- When the gate is closed, `genesis-core` still starts and emits ticks, but it does not watch or load native plugins.
+
 Provided controls:
 
 - ABI version check before accepting a plugin.
