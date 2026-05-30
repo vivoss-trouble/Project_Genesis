@@ -23,6 +23,7 @@ members = [
     "lazarus-artifact-runner",
     "lazarus-synthesizer",
     "lazarus-orchestrator-store",
+    "genesis-wasm-plugin-runner",
     "genesis-plugins/plugin-dummy",
     "genesis-plugins/anchor-mmap",
     "genesis-plugins/brain-llm",
