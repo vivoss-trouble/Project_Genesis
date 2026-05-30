@@ -77,23 +77,35 @@ public final class ProbeIntegrationTest {
 
     @Test
     public void capturesServletAndJdbcSnapshotWithMaskedSensitiveColumns() throws Exception {
-        URL url = new URI("http://127.0.0.1:" + port() + "/account").toURL();
-        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-        connection.setRequestProperty("Authorization-Token", "secret-token");
-        Assert.assertEquals(200, connection.getResponseCode());
-        BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8));
-        Assert.assertEquals("rows=1", reader.readLine());
+        Assert.assertEquals("rows=1", getAccountRows(1));
+        Assert.assertEquals("rows=0", getAccountRows(42));
+        Assert.assertEquals("rows=2", getAccountRows(999));
 
-        String jsonl = waitForJsonl(outputDir);
+        String jsonl = waitForJsonl(outputDir, 3);
         Assert.assertTrue(jsonl.contains("\"status\":\"complete\""));
         Assert.assertTrue(jsonl.contains("\"trace_tags\""));
         Assert.assertTrue(jsonl.contains("\"business_method\":\"com.genesis.lazarus.probe.ProbeIntegrationTest$QueryServlet.doGet\""));
+        Assert.assertTrue(jsonl.contains("\"uri\":\"/account?id=1\""));
+        Assert.assertTrue(jsonl.contains("\"uri\":\"/account?id=42\""));
+        Assert.assertTrue(jsonl.contains("\"uri\":\"/account?id=999\""));
+        Assert.assertTrue(jsonl.contains("where id = 1"));
+        Assert.assertTrue(jsonl.contains("where id = 42"));
+        Assert.assertTrue(jsonl.contains("where id >= 999"));
         Assert.assertTrue(jsonl.contains("\"kind\":\"jdbc_read\""));
         Assert.assertTrue(jsonl.contains("\"password\":\"***\""));
         Assert.assertTrue(jsonl.contains("\"card_number\":\"***\""));
         Assert.assertFalse(jsonl.contains("plain-password"));
         Assert.assertFalse(jsonl.contains("4111111111111111"));
         Assert.assertFalse(jsonl.contains("secret-token"));
+    }
+
+    private String getAccountRows(int id) throws Exception {
+        URL url = new URI("http://127.0.0.1:" + port() + "/account?id=" + id).toURL();
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setRequestProperty("Authorization-Token", "secret-token");
+        Assert.assertEquals(200, connection.getResponseCode());
+        BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8));
+        return reader.readLine();
     }
 
     private int port() {
@@ -106,26 +118,38 @@ public final class ProbeIntegrationTest {
             Statement statement = connection.createStatement();
             statement.execute("create table accounts (id int primary key, username varchar(64), password varchar(64), card_number varchar(64), note varchar(64))");
             statement.execute("insert into accounts values (1, 'alice', 'plain-password', '4111111111111111', 'hello')");
+            statement.execute("insert into accounts values (999, 'bob', 'plain-password', '4222222222222222', 'first')");
+            statement.execute("insert into accounts values (1000, 'bob2', 'plain-password', '4333333333333333', 'second')");
             statement.close();
         } finally {
             connection.close();
         }
     }
 
-    private static String waitForJsonl(File dir) throws Exception {
+    private static String waitForJsonl(File dir, int expectedLines) throws Exception {
         long deadline = System.currentTimeMillis() + 3000L;
         while (System.currentTimeMillis() < deadline) {
             File[] files = dir.listFiles();
             if (files != null) {
                 for (File file : files) {
                     if (file.getName().endsWith(".jsonl") && file.length() > 0) {
-                        return new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+                        String jsonl = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+                        if (lineCount(jsonl) >= expectedLines) {
+                            return jsonl;
+                        }
                     }
                 }
             }
             Thread.sleep(100L);
         }
         throw new AssertionError("snapshot jsonl was not written");
+    }
+
+    private static int lineCount(String text) {
+        if (text.isEmpty()) {
+            return 0;
+        }
+        return text.split("\\R").length;
     }
 
     private static void deleteRecursively(File file) throws Exception {
@@ -158,8 +182,10 @@ public final class ProbeIntegrationTest {
             try {
                 Connection connection = dataSource.getConnection();
                 try {
+                    int id = parseId(request);
                     Statement statement = connection.createStatement();
-                    ResultSet rs = statement.executeQuery("select id, username, password, card_number, note from accounts where id = 1");
+                    String predicate = id == 999 ? "id >= 999" : "id = " + id;
+                    ResultSet rs = statement.executeQuery("select id, username, password, card_number, note from accounts where " + predicate);
                     int rows = 0;
                     while (rs.next()) {
                         rs.getInt("id");
@@ -177,6 +203,14 @@ public final class ProbeIntegrationTest {
                 response.setStatus(500);
                 response.getWriter().println(error.getClass().getName() + ": " + error.getMessage());
             }
+        }
+
+        private static int parseId(HttpServletRequest request) {
+            String raw = request.getParameter("id");
+            if (raw == null || raw.length() == 0) {
+                return 1;
+            }
+            return Integer.parseInt(raw);
         }
     }
 }

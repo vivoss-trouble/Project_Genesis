@@ -41,7 +41,7 @@ public final class LazarusFilter implements Filter {
             capture.snapshot().context.principal =
                     http.getUserPrincipal() == null ? null : http.getUserPrincipal().getName();
             capture.snapshot().upstream.method = http.getMethod();
-            capture.snapshot().upstream.uri = http.getRequestURI();
+            capture.snapshot().upstream.uri = requestUriWithQuery(http);
             capture.snapshot().upstream.headers = headers(http, config.maxFieldBytes);
             capture.snapshot().upstream.body = wrapped.bodyAsString(config.maxFieldBytes);
             capture.snapshot().upstream.raw_body_sha256 = Hashing.sha256Hex(wrapped.body());
@@ -58,7 +58,16 @@ public final class LazarusFilter implements Filter {
     }
 
     private static String operationName(HttpServletRequest request) {
-        return request.getMethod() + " " + request.getRequestURI();
+        return request.getMethod() + " " + requestUriWithQuery(request);
+    }
+
+    private static String requestUriWithQuery(HttpServletRequest request) {
+        String uri = request.getRequestURI();
+        String query = request.getQueryString();
+        if (query == null || query.length() == 0) {
+            return uri;
+        }
+        return uri + "?" + query;
     }
 
     private static Map<String, String> headers(HttpServletRequest request, int maxFieldBytes) {

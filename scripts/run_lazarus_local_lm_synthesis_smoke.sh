@@ -54,6 +54,9 @@ public final class LocalLmPilotSource {
         if (id == 1L) {
             return 1L;
         }
+        if (id == 999L) {
+            return 2L;
+        }
         return 0L;
     }
 }

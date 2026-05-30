@@ -231,21 +231,54 @@ fn derive_row_count_behavior_case(snapshot: &StateSnapshot) -> Result<BehaviorCa
         .downstream_dependencies
         .first()
         .ok_or_else(|| format!("snapshot {} has no dependencies", snapshot.snapshot_id))?;
-    let first_row = dependency.rows.first().ok_or_else(|| {
-        format!(
-            "snapshot {} first dependency has no rows",
-            snapshot.snapshot_id
-        )
-    })?;
-    let id = first_row
-        .get("id")
-        .and_then(serde_json::Value::as_i64)
-        .ok_or_else(|| format!("snapshot {} first row has no i64 id", snapshot.snapshot_id))?;
+    let id = extract_id_from_uri(&snapshot.upstream.uri)
+        .or_else(|| {
+            dependency
+                .query_or_request
+                .as_deref()
+                .and_then(extract_id_from_sql)
+        })
+        .or_else(|| {
+            dependency
+                .rows
+                .first()
+                .and_then(|row| row.get("id"))
+                .and_then(serde_json::Value::as_i64)
+        })
+        .ok_or_else(|| {
+            format!(
+                "snapshot {} has no id in upstream uri or first dependency row",
+                snapshot.snapshot_id
+            )
+        })?;
     Ok(BehaviorCase {
         case_id: snapshot.snapshot_id.clone(),
         payload: serde_json::json!({ "id": id }),
         expected: serde_json::json!({ "value": dependency.rows.len() as i64 }),
     })
+}
+
+fn extract_id_from_uri(uri: &str) -> Option<i64> {
+    let query = uri.split_once('?')?.1;
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        if key == "id" {
+            value.parse::<i64>().ok()
+        } else {
+            None
+        }
+    })
+}
+
+fn extract_id_from_sql(sql: &str) -> Option<i64> {
+    let normalized = sql.to_ascii_lowercase();
+    let marker = "where id =";
+    let start = normalized.find(marker)? + marker.len();
+    normalized[start..]
+        .trim_start()
+        .split(|ch: char| !ch.is_ascii_digit() && ch != '-')
+        .next()
+        .and_then(|value| value.parse::<i64>().ok())
 }
 
 fn collect_snapshot_paths(input: &Path) -> Result<Vec<PathBuf>, String> {
