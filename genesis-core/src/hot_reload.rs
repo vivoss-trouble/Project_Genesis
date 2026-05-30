@@ -3,9 +3,8 @@ use notify::{RecursiveMode, Result, Watcher};
 use std::path::Path;
 use std::sync::mpsc::channel;
 
-
 /// 监控指定目录下的文件变化，触发回调。
-/// 
+///
 /// # Box::leak 设计决策
 /// watcher 通过 leak 获得 "永生"——它独立于任何 RAII 所有权存在。
 /// 在单实例场景中这是合理的（watcher 与进程同生命周期）；

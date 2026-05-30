@@ -418,10 +418,7 @@ pub fn execute_artifact_with_timeout_dev_only(
     }
 }
 
-fn spawn_artifact_child(
-    artifact: &ExecutableArtifact,
-    args: &[i64],
-) -> Result<Child, String> {
+fn spawn_artifact_child(artifact: &ExecutableArtifact, args: &[i64]) -> Result<Child, String> {
     let mut command = Command::new(&artifact.executable_path);
     command
         .args(args.iter().map(i64::to_string))
@@ -476,11 +473,8 @@ pub fn execute_artifact_as_json_dev_only(
     artifact: &ExecutableArtifact,
     payload: &Value,
 ) -> Result<Value, String> {
-    let report = execute_artifact_with_timeout_dev_only(
-        artifact,
-        payload,
-        DEFAULT_ARTIFACT_TIMEOUT,
-    )?;
+    let report =
+        execute_artifact_with_timeout_dev_only(artifact, payload, DEFAULT_ARTIFACT_TIMEOUT)?;
     let Some(value) = report.value else {
         if report.timed_out {
             return Err(format!(
@@ -722,13 +716,12 @@ mod tests {
         )
         .unwrap();
 
-        let report =
-            execute_artifact_with_timeout_dev_only(
-                &artifact,
-                &serde_json::json!({"amount": 7}),
-                DEFAULT_ARTIFACT_TIMEOUT,
-            )
-            .unwrap();
+        let report = execute_artifact_with_timeout_dev_only(
+            &artifact,
+            &serde_json::json!({"amount": 7}),
+            DEFAULT_ARTIFACT_TIMEOUT,
+        )
+        .unwrap();
 
         assert_eq!(report.value, Some(14), "{report:?}");
         assert_eq!(
@@ -797,11 +790,9 @@ mod tests {
     #[test]
     fn native_artifact_public_api_requires_explicit_dev_mode() {
         let root = test_dir("native-disabled");
-        let error = compile_executable_artifact(
-            &sample_ir(),
-            &ArtifactRunnerConfig::new("compute", &root),
-        )
-        .unwrap_err();
+        let error =
+            compile_executable_artifact(&sample_ir(), &ArtifactRunnerConfig::new("compute", &root))
+                .unwrap_err();
 
         assert!(error.contains("disabled by default"));
         let _ = fs::remove_dir_all(root);

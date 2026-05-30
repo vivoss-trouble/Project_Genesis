@@ -153,8 +153,8 @@ impl AuditLogger {
         thread::Builder::new()
             .name("Genesis-Audit-Worker".to_string())
             .spawn(move || {
-                let mut writer = open_audit_writer(&audit_path)
-                    .expect("致命错误：无法打开 audit.jsonl");
+                let mut writer =
+                    open_audit_writer(&audit_path).expect("致命错误：无法打开 audit.jsonl");
 
                 while let Ok(event) = receiver.recv() {
                     let dropped = worker_dropped_count.swap(0, Ordering::Relaxed);
@@ -234,11 +234,7 @@ fn open_audit_writer(path: &Path) -> std::io::Result<BufWriter<std::fs::File>> {
         .map(BufWriter::new)
 }
 
-fn rotate_audit_if_needed(
-    path: &Path,
-    max_bytes: u64,
-    writer: &mut BufWriter<std::fs::File>,
-) {
+fn rotate_audit_if_needed(path: &Path, max_bytes: u64, writer: &mut BufWriter<std::fs::File>) {
     let Ok(metadata) = writer.get_ref().metadata() else {
         return;
     };
@@ -347,10 +343,8 @@ mod tests {
 
     #[test]
     fn rotates_audit_file_at_configured_size_limit() {
-        let root = std::env::temp_dir().join(format!(
-            "genesis-audit-rotation-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("genesis-audit-rotation-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let path = root.join("audit.jsonl");
@@ -373,14 +367,9 @@ mod tests {
             .unwrap()
             .filter_map(Result::ok)
             .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| {
-                        name != "audit.jsonl"
-                            && name.starts_with("audit.")
-                            && name.ends_with(".jsonl")
-                    })
+                entry.file_name().to_str().is_some_and(|name| {
+                    name != "audit.jsonl" && name.starts_with("audit.") && name.ends_with(".jsonl")
+                })
             })
             .count();
         assert_eq!(rotated_count, 1);
