@@ -78,10 +78,18 @@ The probe sends one CVE API request and classifies the result:
 
 - exit `0`: connectivity and response shape are valid.
 - exit `2`: missing API key unless `ALLOW_UNKEYED_NVD=1`.
-- exit `3`: NVD returned HTTP 429 rate limiting.
+- exit `3`: NVD returned HTTP 429 rate limiting after retry exhaustion.
 - exit `4`: unexpected non-200 response.
 
-This script is intentionally separate from lifecycle stress so network rate limits cannot be misdiagnosed as local deadlock or memory pressure.
+The probe uses bounded exponential backoff with jitter:
+
+```text
+NVD_PROBE_MAX_RETRIES=5
+NVD_PROBE_BASE_BACKOFF_SECONDS=6
+NVD_PROBE_MAX_BACKOFF_SECONDS=60
+```
+
+It also prints `Retry-After` / rate-limit response headers when present. This script is intentionally separate from lifecycle stress so network rate limits cannot be misdiagnosed as local deadlock or memory pressure.
 
 ## Non-Negotiables
 

@@ -24,6 +24,7 @@ This addendum updates the architecture/source refactor report after the latest a
    - `scripts/validate_lazarus_java_dependency_scan.sh` runs OWASP Dependency Check in Docker.
    - `NVD_API_KEY` is required unless `ALLOW_UNKEYED_NVD=1` is explicitly set for exploratory local scans.
    - `scripts/validate_nvd_connectivity.sh` isolates NVD API connectivity and HTTP 429 diagnosis from lifecycle stress.
+   - The NVD probe uses bounded exponential backoff with jitter and prints rate-limit headers when present.
 
 5. Lifecycle stress is wired as a gate.
    - `scripts/validate_lazarus_stress.sh` covers action delivery, audit rotation, native timeout, native dev-only rejection, shadow queue drop, worker retire, supervisor respawn, single ledger writer, and Tokio spawn-blocking topology.
