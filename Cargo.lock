@@ -688,11 +688,14 @@ name = "genesis-core"
 version = "0.1.0"
 dependencies = [
  "genesis-contracts",
+ "genesis-plugin-sdk",
+ "genesis-wasm-plugin-runner",
  "libloading",
  "notify",
  "serde",
  "serde_json",
  "socket2",
+ "wat",
 ]
 
 [[package]]

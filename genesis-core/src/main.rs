@@ -64,25 +64,44 @@ fn main() {
 
     println!("[微核] 🧿 全知之眼已睁开，心跳脉冲发生器启动...");
 
-    let plugin_entries = if allow_native_plugins {
-        fs::read_dir(&watch_path).ok()
-    } else {
-        None
-    };
+    let plugin_entries = fs::read_dir(&watch_path).ok();
     if let Some(entries) = plugin_entries {
-        let mut plugin_paths = entries
+        let mut wasm_plugin_paths = Vec::new();
+        let mut native_plugin_paths = Vec::new();
+        for path in entries
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
-            .filter(|path| {
-                path.extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext == "dylib" || ext == "so")
-            })
-            .collect::<Vec<_>>();
-        plugin_paths.sort();
+        {
+            let extension = path.extension().and_then(|ext| ext.to_str());
+            match extension {
+                Some("wasm") => wasm_plugin_paths.push(path),
+                Some("dylib" | "so") if allow_native_plugins => native_plugin_paths.push(path),
+                Some("dylib" | "so") => {
+                    println!(
+                        "[微核] 🔒 跳过原生插件 [{}]；设置 {}=1 才会加载可信插件。",
+                        path.display(),
+                        GENESIS_ALLOW_NATIVE_PLUGINS
+                    );
+                }
+                _ => {}
+            }
+        }
+        wasm_plugin_paths.sort();
+        native_plugin_paths.sort();
 
         let mut guard = kernel.lock().unwrap();
-        for plugin_path in plugin_paths {
+        for plugin_path in wasm_plugin_paths {
+            let Some(plugin_path) = plugin_path.to_str() else {
+                continue;
+            };
+
+            match guard.load_wasm_plugin(plugin_path) {
+                Ok(_) => println!("[微核] ✅ 初始 Wasm 插件装载完成: {}", plugin_path),
+                Err(e) => println!("[微核] ❌ 初始 Wasm 插件装载失败 [{}]: {}", plugin_path, e),
+            }
+        }
+
+        for plugin_path in native_plugin_paths {
             let Some(plugin_path) = plugin_path.to_str() else {
                 continue;
             };

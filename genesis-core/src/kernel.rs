@@ -4,9 +4,14 @@ use genesis_contracts::wire::{
     GENESIS_STATUS_TAINTED, GENESIS_STATUS_THINKING, GENESIS_STATUS_TIMEOUT, GenesisPluginApi,
     GenesisResponse, GenesisSlice,
 };
+use genesis_plugin_sdk::{PluginRequest, PluginStatus};
+use genesis_wasm_plugin_runner::{
+    LinearMemoryTransport, PluginError as WasmPluginError, WasmPluginLimits, WasmPluginTransport,
+};
 use libloading::{Library, Symbol};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::fs;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::act::{ActDispatcher, BrainActionEnvelope};
@@ -22,8 +27,14 @@ struct LoadedPlugin {
     name: String,
 }
 
+struct LoadedWasmPlugin {
+    name: String,
+    transport: LinearMemoryTransport,
+}
+
 pub struct GenesisKernel {
     plugins: HashMap<String, LoadedPlugin>,
+    wasm_plugins: HashMap<String, LoadedWasmPlugin>,
     retired_plugins: Vec<LoadedPlugin>,
     act_dispatcher: ActDispatcher,
     auditor: AuditLogger,
@@ -47,11 +58,32 @@ impl GenesisKernel {
     pub fn new(auditor: AuditLogger) -> Self {
         Self {
             plugins: HashMap::new(),
+            wasm_plugins: HashMap::new(),
             retired_plugins: Vec::new(),
             act_dispatcher: ActDispatcher::new(4, auditor.clone()),
             auditor,
             active_plan: None,
         }
+    }
+
+    pub fn load_wasm_plugin(&mut self, path: &str) -> Result<(), String> {
+        let wasm_bytes = fs::read(path).map_err(|error| error.to_string())?;
+        let name = wasm_plugin_name_from_path(path);
+        let transport = LinearMemoryTransport::from_bytes(
+            name.clone(),
+            &wasm_bytes,
+            WasmPluginLimits {
+                max_input_bytes: 64 * 1024,
+                max_output_bytes: 64 * 1024,
+                max_fuel: 100_000,
+                max_memory_bytes: 2 * 1024 * 1024,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        println!("[微核] 🧊 Wasm 插件 [{}] 已进入沙盒隔离区。", name);
+        self.wasm_plugins
+            .insert(path.to_string(), LoadedWasmPlugin { name, transport });
+        Ok(())
     }
 
     pub fn load_plugin(&mut self, path: &str) -> Result<(), String> {
@@ -102,7 +134,7 @@ impl GenesisKernel {
 
     pub fn trigger_all(&mut self, tick_id: u64, payload: &str) {
         self.reap_retired_plugins();
-        if self.plugins.is_empty() {
+        if self.plugins.is_empty() && self.wasm_plugins.is_empty() {
             println!("[突触传导] 🫀 脉冲跳动... 但暂无器官接入。");
             return;
         }
@@ -134,6 +166,10 @@ impl GenesisKernel {
                 }
                 BrainDispatch::None => {}
             }
+        }
+
+        for plugin in self.wasm_plugins.values() {
+            trigger_loaded_wasm_plugin(plugin, tick_id, payload, &auditor);
         }
 
         if let Some(action_id) = dispatched_plan_action {
@@ -327,6 +363,14 @@ impl GenesisKernel {
     }
 }
 
+fn wasm_plugin_name_from_path(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "wasm-plugin".to_string())
+}
+
 fn attach_delivery_evidence(evidence: &mut serde_json::Value, pending: &crate::act::PendingAction) {
     let delivery = serde_json::json!({
         "status": pending.delivery_status(),
@@ -457,6 +501,92 @@ fn trigger_loaded_plugin(
     }
 
     BrainDispatch::None
+}
+
+fn trigger_loaded_wasm_plugin(
+    plugin: &LoadedWasmPlugin,
+    tick_id: u64,
+    payload: &str,
+    auditor: &AuditLogger,
+) {
+    let started_at = Instant::now();
+    let request = match PluginRequest::new(
+        plugin.name.clone(),
+        format!("tick-{tick_id}-{}", plugin.name),
+        serde_json::json!({
+            "tick_id": tick_id,
+            "payload": payload,
+        }),
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            auditor.log(AuditEvent::FailureObserved {
+                tick_id,
+                component: plugin.name.clone(),
+                error: format!("failed to create wasm plugin request: {error}"),
+            });
+            return;
+        }
+    };
+
+    match plugin.transport.invoke(request) {
+        Ok(response) => {
+            let latency_ms = started_at.elapsed().as_millis() as u64;
+            let status_code = match response.status {
+                PluginStatus::Ok => GENESIS_STATUS_OK,
+                PluginStatus::Error => GENESIS_STATUS_ERROR,
+            };
+            let error_code = if response.error_code.is_some() { 1 } else { 0 };
+            let data_preview = response.data.to_string();
+            println!(
+                "[突触传导] 🧊 [{}] wasm status={:?} data={}",
+                plugin.name, response.status, data_preview
+            );
+            auditor.log(AuditEvent::PluginResponded {
+                tick_id,
+                plugin_id: plugin.name.clone(),
+                status: status_code,
+                error_code,
+                latency_ms,
+                data_hash: fnv1a64(data_preview.as_bytes()),
+                data_preview: preview(&data_preview, 240),
+            });
+            if matches!(response.status, PluginStatus::Error) {
+                auditor.log(AuditEvent::FailureObserved {
+                    tick_id,
+                    component: plugin.name.clone(),
+                    error: format!(
+                        "wasm plugin returned error: {}",
+                        response
+                            .error_code
+                            .unwrap_or_else(|| "unknown_error".to_string())
+                    ),
+                });
+            }
+        }
+        Err(error) => {
+            let detail = wasm_plugin_error_detail(&error);
+            println!(
+                "[突触传导] 🧊 [{}] wasm invocation failed: {}",
+                plugin.name, detail
+            );
+            auditor.log(AuditEvent::FailureObserved {
+                tick_id,
+                component: plugin.name.clone(),
+                error: detail,
+            });
+        }
+    }
+}
+
+fn wasm_plugin_error_detail(error: &WasmPluginError) -> String {
+    match error {
+        WasmPluginError::FatalPluginCrash(audit) => format!(
+            "fatal wasm plugin crash phase={} kind={} request={} message={}",
+            audit.phase, audit.trap_kind, audit.request_id, audit.trap_message
+        ),
+        other => other.to_string(),
+    }
 }
 
 fn dispatch_brain_action(
@@ -636,8 +766,12 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::unwrap_brain_decision;
+    use super::{GenesisKernel, unwrap_brain_decision};
+    use crate::audit::AuditLogger;
     use serde_json::json;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn keeps_plain_brain_action_backward_compatible() {
@@ -668,5 +802,74 @@ mod tests {
         let (_, advisory) = unwrap_brain_decision(packet);
 
         assert!(!advisory.expect("advisory metadata").is_valid());
+    }
+
+    #[test]
+    fn kernel_loads_and_triggers_wasm_plugin() {
+        let wasm_path = write_wasm_fixture();
+        let mut kernel = GenesisKernel::new(AuditLogger::new(16));
+
+        kernel
+            .load_wasm_plugin(wasm_path.to_str().expect("utf-8 fixture path"))
+            .expect("load wasm plugin");
+        kernel.trigger_all(42, "core-wasm-payload");
+    }
+
+    fn write_wasm_fixture() -> PathBuf {
+        let response =
+            br#"{"schema_version":1,"status":"ok","error_code":null,"data":{"core":"ok"}}"#;
+        let response_len = response.len();
+        let response_wat = wat_string(response);
+        let wasm = wat::parse_str(format!(
+            r#"
+            (module
+              (memory (export "memory") 1 2)
+              (global $heap (mut i32) (i32.const 4096))
+              (data (i32.const 2048) "{response_wat}")
+              (func (export "genesis_plugin_api_version") (result i32)
+                i32.const 1)
+              (func (export "genesis_alloc") (param $len i32) (result i32)
+                global.get $heap
+                global.get $heap
+                local.get $len
+                i32.add
+                global.set $heap)
+              (func (export "genesis_dealloc") (param $ptr i32) (param $len i32))
+              (func (export "genesis_handle") (param $ptr i32) (param $len i32) (result i64)
+                i64.const {packed})
+            )
+            "#,
+            packed = ((2048_u64) << 32) | response_len as u64
+        ))
+        .expect("valid wat fixture");
+        let path = unique_temp_dir().join("core-wasm-fixture.wasm");
+        fs::write(&path, wasm).expect("write wasm fixture");
+        path
+    }
+
+    fn wat_string(bytes: &[u8]) -> String {
+        let mut out = String::new();
+        for byte in bytes {
+            match *byte {
+                b'"' => out.push_str("\\\""),
+                b'\\' => out.push_str("\\\\"),
+                0x20..=0x7e => out.push(*byte as char),
+                _ => out.push_str(&format!("\\{:02x}", byte)),
+            }
+        }
+        out
+    }
+
+    fn unique_temp_dir() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "genesis-core-wasm-loader-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 }
