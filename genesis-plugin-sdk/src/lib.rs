@@ -1,7 +1,13 @@
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+use alloc::format;
+use alloc::string::String;
+use core::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-use std::fmt;
 
 pub const GENESIS_WASM_PLUGIN_API_VERSION: u32 = 1;
 
@@ -87,6 +93,7 @@ impl fmt::Display for PluginError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for PluginError {}
 
 pub trait GenesisPlugin {
@@ -122,7 +129,11 @@ macro_rules! export_plugin {
 
 pub mod __abi {
     use super::{GenesisPlugin, PluginError, PluginRequest, PluginResponse};
-    use std::slice;
+    use alloc::boxed::Box;
+    use alloc::format;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use core::slice;
 
     pub fn alloc(len: u32) -> u32 {
         if len == 0 {
@@ -142,7 +153,7 @@ pub mod __abi {
         if ptr == 0 && len == 0 {
             return;
         }
-        let slice = std::ptr::slice_from_raw_parts_mut(ptr as usize as *mut u8, len as usize);
+        let slice = core::ptr::slice_from_raw_parts_mut(ptr as usize as *mut u8, len as usize);
         unsafe {
             drop(Box::from_raw(slice));
         }

@@ -83,6 +83,9 @@ Implemented in `genesis-plugin-sdk`:
 - `export_plugin!(Type)` macro that emits the required C ABI exports.
 - SDK-owned guest allocation/deallocation helpers that keep raw pointer handling out of plugin business code.
 - Business errors are serialized as normal `PluginResponse::Error`; panics are not caught and remain host-side fatal traps.
+- `genesis-wasm-plugin-runner` integration tests dynamically compile a real `genesis-plugin-sdk` guest fixture to `wasm32-wasip1` in an isolated temporary workspace and target directory.
+- The real fixture covers echo, business error, panic, and memory pressure branches.
+- The runner does not provide WASI imports. It only whitelists a pure `env.memcmp` helper needed by the current no-std Rust guest output; the helper can only read guest linear memory.
 
 The first implementation deliberately does not use Component Model / WIT. That path remains a future `ComponentModelTransport` candidate behind the same `WasmPluginTransport` trait.
 

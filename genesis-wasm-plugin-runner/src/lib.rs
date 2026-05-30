@@ -2,7 +2,9 @@ use genesis_plugin_sdk::{GENESIS_WASM_PLUGIN_API_VERSION, PluginRequest, PluginR
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::fmt;
-use wasmtime::{Config, Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder, Trap};
+use wasmtime::{
+    Caller, Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, Trap,
+};
 
 const WASM_PAGE_BYTES: usize = 64 * 1024;
 
@@ -215,7 +217,10 @@ impl WasmPluginTransport for LinearMemoryTransport {
         }
 
         let mut store = self.new_store()?;
-        let instance = Instance::new(&mut store, &self.module, &[])
+        let mut linker = Linker::new(&self.engine);
+        define_pure_memory_imports(&mut linker)?;
+        let instance = linker
+            .instantiate(&mut store, &self.module)
             .map_err(|error| PluginError::Instantiation(error.to_string()))?;
         let memory = instance
             .get_memory(&mut store, "memory")
@@ -362,6 +367,58 @@ fn ensure_guest_range(
         });
     }
     Ok(())
+}
+
+fn define_pure_memory_imports(linker: &mut Linker<HostState>) -> Result<(), PluginError> {
+    linker
+        .func_wrap(
+            "env",
+            "memcmp",
+            |mut caller: Caller<'_, HostState>, left: i32, right: i32, len: i32| -> i32 {
+                host_memcmp(&mut caller, left, right, len)
+            },
+        )
+        .map_err(|error| PluginError::Instantiation(error.to_string()))?;
+    Ok(())
+}
+
+fn host_memcmp(caller: &mut Caller<'_, HostState>, left: i32, right: i32, len: i32) -> i32 {
+    if left < 0 || right < 0 || len < 0 {
+        return 1;
+    }
+    let Some(memory) = caller
+        .get_export("memory")
+        .and_then(|export| export.into_memory())
+    else {
+        return 1;
+    };
+    memory_cmp(&memory, caller, left as usize, right as usize, len as usize)
+}
+
+fn memory_cmp(
+    memory: &Memory,
+    caller: &mut Caller<'_, HostState>,
+    left: usize,
+    right: usize,
+    len: usize,
+) -> i32 {
+    let mut left_byte = [0_u8; 1];
+    let mut right_byte = [0_u8; 1];
+    for offset in 0..len {
+        if memory.read(&caller, left + offset, &mut left_byte).is_err()
+            || memory
+                .read(&caller, right + offset, &mut right_byte)
+                .is_err()
+        {
+            return 1;
+        }
+        match left_byte[0].cmp(&right_byte[0]) {
+            std::cmp::Ordering::Less => return -1,
+            std::cmp::Ordering::Greater => return 1,
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+    0
 }
 
 fn unpack_ptr_len(value: u64) -> (u32, u32) {
