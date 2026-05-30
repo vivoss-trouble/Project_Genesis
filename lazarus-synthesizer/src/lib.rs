@@ -29,7 +29,7 @@ pub use oracle::{OpenAiOracleAdapter, OracleHttpConfig, OracleHttpProtocol};
 pub use prompt::{CompiledPrompt, PromptCompiler, PromptCompilerConfig};
 pub use safety::{
     DEFAULT_MAX_BRANCH_TOKENS, DEFAULT_MAX_SOURCE_BYTES, DEFAULT_MAX_SOURCE_LINES,
-    analyze_maintainability, validate_source_policy,
+    analyze_maintainability, validate_source_policy, validate_source_policy_for_input,
 };
 pub use types::*;
 
@@ -62,7 +62,7 @@ pub fn synthesize_with_oracle<O: OracleClient>(
         };
         let candidate = oracle.propose(&prompt)?;
         let source_hash = stable_hash_bytes(candidate.rust_source.as_bytes());
-        let policy = validate_source_policy(&candidate.rust_source);
+        let policy = validate_source_policy_for_input(&candidate.rust_source, input);
         if !policy.accepted {
             let message = format!(
                 "source policy rejected candidate {source_hash}: {}",
@@ -351,6 +351,62 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn policy_rejects_single_case_literal_replay_before_compile() {
+        let root = temp_root("synth-literal-replay");
+        let mut config = SynthesizerConfig::new("compute", &root);
+        config.max_iterations = 1;
+        config.training_percent = 100;
+        let input = SynthesisInput {
+            legacy_source: "long compute(long amount) { return amount * 2; }".to_string(),
+            input_order: vec!["amount".to_string()],
+            state_snapshots: Vec::new(),
+            behavior_cases: vec![case("c1", 2, 4)],
+        };
+        let mut oracle = ScriptedOracle::new(vec![source_returning("4")]);
+
+        let report = synthesize_with_oracle(&mut oracle, &input, &config).unwrap();
+
+        assert_eq!(report.verdict, SynthesisVerdict::PolicyRejected);
+        assert!(!report.iterations[0].policy.accepted);
+        assert!(
+            report.iterations[0]
+                .policy
+                .violations
+                .iter()
+                .any(|violation| violation.contains("expected numeric result literal 4"))
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn policy_rejects_expected_string_literal_replay() {
+        let input = SynthesisInput {
+            legacy_source: "String role() { return user.getRole(); }".to_string(),
+            input_order: vec!["user_id".to_string()],
+            state_snapshots: Vec::new(),
+            behavior_cases: vec![BehaviorCase {
+                case_id: "c1".to_string(),
+                payload: serde_json::json!({"user_id": 7}),
+                expected: serde_json::json!({"value": "admin"}),
+            }],
+        };
+
+        let report = validate_source_policy_for_input(
+            r#"pub fn role(_user_id: i64) -> &'static str { "admin" }"#,
+            &input,
+        );
+
+        assert!(!report.accepted);
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|violation| violation.contains("expected string literal 'admin'"))
+        );
     }
 
     #[test]
