@@ -9,6 +9,8 @@ OUT_DIR="${LAZARUS_LM_OUT_DIR:-$(mktemp -d /tmp/lazarus-local-lm-synth.XXXXXX)}"
 REPORT_DIR="$(mktemp -d /tmp/lazarus-local-lm-report.XXXXXX)"
 JAVA_SOURCE="$OUT_DIR/LocalLmPilotSource.java"
 
+mkdir -p "$OUT_DIR"
+
 if ! curl -fsS --max-time 2 "$MODELS_ENDPOINT" >/tmp/lazarus-local-lm-models.json; then
   echo "local LM endpoint is not reachable: $MODELS_ENDPOINT" >&2
   echo "start LM Studio local server or set LAZARUS_LM_ENDPOINT" >&2

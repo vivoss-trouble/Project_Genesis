@@ -182,15 +182,20 @@ fn contains_returned_bool_literal(source: &str, value: bool) -> bool {
 }
 
 fn contains_returned_literal_patterns(source: &str, value: &str) -> bool {
-    [
-        format!("return {value}"),
-        format!("{{ {value} }}"),
-        format!("=> {value}"),
-        format!("= {value};"),
-        format!("Ok({value})"),
-    ]
-    .iter()
-    .any(|pattern| source.contains(pattern))
+    let variants = rust_literal_variants(value);
+    variants.iter().any(|literal| {
+        [
+            format!("return {literal}"),
+            format!("{{ {literal} }}"),
+            format!("=> {literal}"),
+            format!("= {literal};"),
+            format!("Ok({literal})"),
+            format!("\n    {literal}\n"),
+            format!("\n        {literal}\n"),
+        ]
+        .iter()
+        .any(|pattern| source.contains(pattern))
+    })
 }
 
 fn preview_literal(value: &str) -> String {
@@ -199,5 +204,19 @@ fn preview_literal(value: &str) -> String {
         value.to_string()
     } else {
         format!("{}...", &value[..MAX_PREVIEW])
+    }
+}
+
+fn rust_literal_variants(value: &str) -> Vec<String> {
+    if value.parse::<i128>().is_ok() {
+        [
+            "", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128",
+            "usize",
+        ]
+        .iter()
+        .map(|suffix| format!("{value}{suffix}"))
+        .collect()
+    } else {
+        vec![value.to_string()]
     }
 }

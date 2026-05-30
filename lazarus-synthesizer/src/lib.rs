@@ -383,6 +383,29 @@ mod tests {
     }
 
     #[test]
+    fn policy_rejects_suffixed_numeric_literal_replay() {
+        let input = SynthesisInput {
+            legacy_source: "long compute(long amount) { return amount * 2; }".to_string(),
+            input_order: vec!["amount".to_string()],
+            state_snapshots: Vec::new(),
+            behavior_cases: vec![case("c1", 2, 4)],
+        };
+
+        let report = validate_source_policy_for_input(
+            "#![no_std]\npub extern \"C\" fn compute(amount: i64) -> i64 {\n    4i64\n}",
+            &input,
+        );
+
+        assert!(!report.accepted);
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|violation| violation.contains("expected numeric result literal 4"))
+        );
+    }
+
+    #[test]
     fn policy_rejects_expected_string_literal_replay() {
         let input = SynthesisInput {
             legacy_source: "String role() { return user.getRole(); }".to_string(),
@@ -469,6 +492,31 @@ mod tests {
         assert!(compiled.text.contains("com.bank.TransferService.execute"));
         assert!(compiled.text.contains("<truncated>"));
         assert!(!compiled.text.contains("x-extra-header"));
+    }
+
+    #[test]
+    fn policy_feedback_uses_compile_fix_prompt() {
+        let prompt = OraclePrompt {
+            iteration: 2,
+            function_name: "compute".to_string(),
+            input_order: vec!["amount".to_string()],
+            legacy_source: "long compute(long amount) { return amount * 2; }".to_string(),
+            visible_state_snapshots: Vec::new(),
+            visible_behavior_cases: vec![case("c1", 2, 4)],
+            prior_feedback: vec![OracleFeedback {
+                kind: "policy_rejected".to_string(),
+                message: "overfitting: candidate embeds expected numeric result literal 4"
+                    .to_string(),
+            }],
+        };
+
+        let compiled = PromptCompiler::default()
+            .compile(PromptStage::CompileFix, &prompt)
+            .unwrap();
+
+        assert!(compiled.text.contains("source-policy feedback"));
+        assert!(compiled.text.contains("literal replay"));
+        assert!(compiled.text.contains("expected numeric result literal 4"));
     }
 
     #[test]

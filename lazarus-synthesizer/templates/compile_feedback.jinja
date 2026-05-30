@@ -1,5 +1,7 @@
-Fix the Rust source so it compiles for wasm32-wasip1.
+Fix the Rust source so it passes Lazarus source policy and compiles for wasm32-wasip1.
 Return only one Rust source file. Keep the exported function name exactly: {{ function_name }}.
+If prior feedback mentions overfitting or literal replay, do not return the sample expected constant directly.
+Derive the result from input arguments or the legacy control flow instead of replaying Behavior case outputs.
 
 Hard ABI contract:
 - The file is compiled directly with rustc, not Cargo.
@@ -14,7 +16,7 @@ Hard ABI contract:
 
 Input order JSON: {{ input_order_json }}
 
-Prior compiler feedback:
+Prior compiler or source-policy feedback:
 ```json
 {{ prior_feedback_json }}
 ```

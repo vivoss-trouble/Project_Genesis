@@ -121,7 +121,7 @@ impl PromptCompiler {
 
 pub(crate) fn infer_prompt_stage(feedback: &[OracleFeedback]) -> PromptStage {
     match feedback.last().map(|item| item.kind.as_str()) {
-        Some("compile_error") => PromptStage::CompileFix,
+        Some("compile_error" | "policy_rejected") => PromptStage::CompileFix,
         Some("semantic_mismatch") => PromptStage::SemanticFix,
         _ => PromptStage::InitialGeneration,
     }
