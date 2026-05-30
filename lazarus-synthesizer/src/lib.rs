@@ -3,8 +3,8 @@ use std::fs;
 use std::path::Path;
 
 mod artifact;
-mod correlator;
 mod corpus;
+mod correlator;
 mod hash;
 mod oracle;
 mod prompt;
@@ -24,13 +24,13 @@ use oracle::{extract_oracle_text, extract_rust_source, oracle_request_body};
 #[cfg(test)]
 use serde_json::Value;
 
+pub use correlator::{JavaMethodSource, MethodCorpus, correlate_snapshots_by_trace_tag};
+pub use oracle::{OpenAiOracleAdapter, OracleHttpConfig, OracleHttpProtocol};
+pub use prompt::{CompiledPrompt, PromptCompiler, PromptCompilerConfig};
 pub use safety::{
     DEFAULT_MAX_BRANCH_TOKENS, DEFAULT_MAX_SOURCE_BYTES, DEFAULT_MAX_SOURCE_LINES,
     analyze_maintainability, validate_source_policy,
 };
-pub use correlator::{JavaMethodSource, MethodCorpus, correlate_snapshots_by_trace_tag};
-pub use oracle::{OpenAiOracleAdapter, OracleHttpConfig, OracleHttpProtocol};
-pub use prompt::{CompiledPrompt, PromptCompiler, PromptCompilerConfig};
 pub use types::*;
 
 pub fn synthesize_with_oracle<O: OracleClient>(

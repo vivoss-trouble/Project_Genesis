@@ -1,0 +1,15 @@
+[package]
+name = "plugin-dummy-wasm"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+genesis-plugin-sdk = { path = "../../genesis-plugin-sdk", default-features = false }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wee_alloc = "0.4"
