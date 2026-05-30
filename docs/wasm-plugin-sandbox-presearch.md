@@ -15,11 +15,15 @@ Native Genesis plugins are a trusted extension mechanism, not a sandbox. The nex
 
 This catches plugin panics and timeouts, but it cannot stop undefined behavior, arbitrary syscalls, filesystem writes, network access, or mmap side effects inside the host process.
 
-Native plugin loading is therefore opt-in through:
+Native plugin loading is therefore restricted to trusted development/test profiles through all of:
 
 ```bash
+GENESIS_RUNTIME_PROFILE=development
 GENESIS_ALLOW_NATIVE_PLUGINS=1
+GENESIS_NATIVE_PLUGIN_TRUST=dev-only
 ```
+
+Unset, release, and production runtime profiles keep native loading disabled even if `GENESIS_ALLOW_NATIVE_PLUGINS=1` is present. Third-party or generated plugins must use Wasm or a future out-of-process worker boundary.
 
 ## Target Boundary
 
@@ -58,7 +62,7 @@ Required host controls:
 
 ## Migration Order
 
-1. Keep existing native plugins under the opt-in trusted gate.
+1. Keep existing native plugins under the development-only trusted gate.
 2. Add a `genesis-wasm-plugin-runner` crate that can execute one wasm file against one payload.
 3. Add a dummy Wasm plugin fixture with no WASI imports.
 4. Add unit tests for fuel exhaustion, oversized response rejection, and missing export rejection.
@@ -103,5 +107,5 @@ Before accepting untrusted Wasm plugins:
 
 - `cargo test -p genesis-wasm-plugin-runner --all-targets`
 - workspace `cargo clippy --workspace --all-targets -- -D warnings`
-- a security boundary test proving native plugin loading is disabled without `GENESIS_ALLOW_NATIVE_PLUGINS=1`
+- a security boundary test proving native plugin loading is disabled without the full development-only native trust gate
 - a fixture test proving a looping Wasm plugin is stopped by fuel exhaustion

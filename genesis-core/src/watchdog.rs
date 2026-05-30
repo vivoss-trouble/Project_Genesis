@@ -18,6 +18,7 @@ pub struct PluginWorker {
     receiver: Option<Receiver<GenesisResponse>>,
     api: GenesisPluginApi,
     handle: Option<JoinHandle<()>>,
+    shutdown_handle: Option<JoinHandle<()>>,
     pub is_tainted: bool,
 }
 
@@ -73,6 +74,7 @@ impl PluginWorker {
             receiver: Some(rx_out),
             api,
             handle: Some(handle),
+            shutdown_handle: None,
             is_tainted: false,
         }
     }
@@ -126,8 +128,22 @@ impl PluginWorker {
         }
     }
 
-    pub fn shutdown(&self) {
-        (self.api.shutdown)();
+    pub fn shutdown(&mut self) {
+        if self.shutdown_handle.is_some() {
+            return;
+        }
+        let shutdown = self.api.shutdown;
+        match thread::Builder::new()
+            .name("Genesis-Plugin-Shutdown".to_string())
+            .spawn(move || (shutdown)())
+        {
+            Ok(handle) => {
+                self.shutdown_handle = Some(handle);
+            }
+            Err(error) => {
+                eprintln!("[Watchdog] plugin shutdown thread spawn failed: {error}");
+            }
+        }
     }
 
     pub fn retire(&mut self) {
@@ -135,6 +151,15 @@ impl PluginWorker {
     }
 
     pub fn try_reap(&mut self) -> bool {
+        if let Some(handle) = self.shutdown_handle.as_ref()
+            && !handle.is_finished()
+        {
+            return false;
+        }
+        if let Some(handle) = self.shutdown_handle.take() {
+            let _ = handle.join();
+        }
+
         let Some(handle) = self.handle.as_ref() else {
             return true;
         };
@@ -147,6 +172,12 @@ impl PluginWorker {
         true
     }
 
+    pub fn is_shutdown_pending(&self) -> bool {
+        self.shutdown_handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+    }
+
     fn taint(&mut self) {
         self.is_tainted = true;
         self.sender.take();
@@ -156,4 +187,62 @@ impl PluginWorker {
 
 fn tainted_response() -> GenesisResponse {
     GenesisResponse::empty(GENESIS_STATUS_TAINTED, GENESIS_ERROR_NONE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    extern "C" fn noop_on_event(_: GenesisPayload) -> GenesisResponse {
+        GenesisResponse::empty(GENESIS_STATUS_ERROR, GENESIS_ERROR_NONE)
+    }
+
+    extern "C" fn noop_free_response(_: GenesisResponse) {}
+
+    extern "C" fn slow_shutdown() {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    #[test]
+    fn shutdown_does_not_block_caller_on_plugin_code() {
+        let api = GenesisPluginApi {
+            abi_version: GENESIS_ABI_VERSION,
+            plugin_id: GenesisSlice::empty(),
+            on_event: noop_on_event,
+            free_response: noop_free_response,
+            shutdown: slow_shutdown,
+        };
+        let mut worker = PluginWorker::new(api);
+
+        let started = Instant::now();
+        worker.shutdown();
+        assert!(started.elapsed() < Duration::from_millis(250));
+
+        worker.retire();
+        while !worker.try_reap() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn shutdown_pending_is_observable_until_reaped() {
+        let api = GenesisPluginApi {
+            abi_version: GENESIS_ABI_VERSION,
+            plugin_id: GenesisSlice::empty(),
+            on_event: noop_on_event,
+            free_response: noop_free_response,
+            shutdown: slow_shutdown,
+        };
+        let mut worker = PluginWorker::new(api);
+
+        worker.shutdown();
+        assert!(worker.is_shutdown_pending());
+
+        worker.retire();
+        while !worker.try_reap() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!worker.is_shutdown_pending());
+    }
 }

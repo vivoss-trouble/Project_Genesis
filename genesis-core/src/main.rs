@@ -15,6 +15,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const GENESIS_ALLOW_NATIVE_PLUGINS: &str = "GENESIS_ALLOW_NATIVE_PLUGINS";
+const GENESIS_NATIVE_PLUGIN_TRUST: &str = "GENESIS_NATIVE_PLUGIN_TRUST";
+const GENESIS_RUNTIME_PROFILE: &str = "GENESIS_RUNTIME_PROFILE";
 
 fn main() {
     println!("🌌 创世纪微核 (Genesis Core) - 永不停机版本启动...");
@@ -32,8 +34,8 @@ fn main() {
     let allow_native_plugins = native_plugins_enabled();
     if !allow_native_plugins {
         println!(
-            "[微核] 🔒 原生 .so/.dylib 插件默认禁用；设置 {}=1 才会加载可信插件。",
-            GENESIS_ALLOW_NATIVE_PLUGINS
+            "[微核] 🔒 原生 .so/.dylib 插件默认禁用；仅明确 development/local profile + {}=1 + {}=dev-only 才会加载可信插件。",
+            GENESIS_ALLOW_NATIVE_PLUGINS, GENESIS_NATIVE_PLUGIN_TRUST
         );
     }
 
@@ -78,9 +80,10 @@ fn main() {
                 Some("dylib" | "so") if allow_native_plugins => native_plugin_paths.push(path),
                 Some("dylib" | "so") => {
                     println!(
-                        "[微核] 🔒 跳过原生插件 [{}]；设置 {}=1 才会加载可信插件。",
+                        "[微核] 🔒 跳过原生插件 [{}]；仅 development/local profile + {}=1 + {}=dev-only 会加载可信插件。",
                         path.display(),
-                        GENESIS_ALLOW_NATIVE_PLUGINS
+                        GENESIS_ALLOW_NATIVE_PLUGINS,
+                        GENESIS_NATIVE_PLUGIN_TRUST
                     );
                 }
                 _ => {}
@@ -141,7 +144,22 @@ fn main() {
 }
 
 fn native_plugins_enabled() -> bool {
-    parse_native_plugin_flag(std::env::var(GENESIS_ALLOW_NATIVE_PLUGINS).ok().as_deref())
+    native_plugins_enabled_for(
+        std::env::var(GENESIS_ALLOW_NATIVE_PLUGINS).ok().as_deref(),
+        std::env::var(GENESIS_RUNTIME_PROFILE).ok().as_deref(),
+        std::env::var(GENESIS_NATIVE_PLUGIN_TRUST).ok().as_deref(),
+    )
+}
+
+fn native_plugins_enabled_for(
+    allow_value: Option<&str>,
+    profile_value: Option<&str>,
+    trust_value: Option<&str>,
+) -> bool {
+    if !runtime_profile_allows_native_plugins(profile_value) {
+        return false;
+    }
+    parse_native_plugin_flag(allow_value) && parse_native_plugin_trust(trust_value)
 }
 
 fn parse_native_plugin_flag(value: Option<&str>) -> bool {
@@ -151,9 +169,30 @@ fn parse_native_plugin_flag(value: Option<&str>) -> bool {
     )
 }
 
+fn parse_native_plugin_trust(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim),
+        Some("dev-only") | Some("DEV-ONLY") | Some("trusted-dev") | Some("TRUSTED-DEV")
+    )
+}
+
+fn runtime_profile_allows_native_plugins(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim),
+        Some("development")
+            | Some("DEVELOPMENT")
+            | Some("dev")
+            | Some("DEV")
+            | Some("local")
+            | Some("LOCAL")
+            | Some("test")
+            | Some("TEST")
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_native_plugin_flag;
+    use super::{native_plugins_enabled_for, parse_native_plugin_flag, parse_native_plugin_trust};
 
     #[test]
     fn native_plugin_loading_is_opt_in() {
@@ -163,5 +202,52 @@ mod tests {
         assert!(parse_native_plugin_flag(Some("1")));
         assert!(parse_native_plugin_flag(Some("true")));
         assert!(parse_native_plugin_flag(Some(" yes ")));
+    }
+
+    #[test]
+    fn native_plugin_trust_scope_is_explicit() {
+        assert!(!parse_native_plugin_trust(None));
+        assert!(!parse_native_plugin_trust(Some("production")));
+        assert!(parse_native_plugin_trust(Some("dev-only")));
+        assert!(parse_native_plugin_trust(Some("trusted-dev")));
+    }
+
+    #[test]
+    fn native_plugins_require_dev_profile_flag_and_trust_scope() {
+        assert!(!native_plugins_enabled_for(
+            Some("1"),
+            Some("release"),
+            Some("dev-only")
+        ));
+        assert!(!native_plugins_enabled_for(
+            Some("true"),
+            Some("production"),
+            Some("dev-only")
+        ));
+        assert!(!native_plugins_enabled_for(
+            Some("1"),
+            None,
+            Some("dev-only")
+        ));
+        assert!(!native_plugins_enabled_for(
+            Some("1"),
+            Some("development"),
+            None
+        ));
+        assert!(!native_plugins_enabled_for(
+            Some("0"),
+            Some("development"),
+            Some("dev-only")
+        ));
+        assert!(native_plugins_enabled_for(
+            Some("1"),
+            Some("development"),
+            Some("dev-only")
+        ));
+        assert!(native_plugins_enabled_for(
+            Some("1"),
+            Some("local"),
+            Some("trusted-dev")
+        ));
     }
 }

@@ -21,6 +21,7 @@ import queue
 import re
 import socket
 import socketserver
+import sys
 import threading
 import time
 import urllib.parse
@@ -28,6 +29,10 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from daemon_transport import BoundedThreadingMixIn, ClientThreadLimiter, read_line
 
 
 def origin_of(url: str) -> str:
@@ -58,6 +63,7 @@ ACTION_TIMEOUT_MS = int(os.environ.get("GENESIS_WEB_ACTION_TIMEOUT_MS", "3000"))
 MAX_WAIT_MS = 2_000
 REFRESH_INTERVAL_SEC = float(os.environ.get("GENESIS_WEB_REFRESH_SEC", "1.0"))
 ACTION_QUEUE_SIZE = int(os.environ.get("GENESIS_WEB_ACTION_QUEUE", "32"))
+CLIENT_THREADS = ClientThreadLimiter("web-arena", connection_arg_index=1)
 
 
 class ArenaState:
@@ -149,14 +155,15 @@ def start_act_socket(state: ArenaState) -> None:
     def accept_loop() -> None:
         while True:
             conn, _ = server.accept()
-            threading.Thread(target=handle_action, args=(state, conn), daemon=True).start()
+            CLIENT_THREADS.spawn(handle_action, state, conn)
 
     threading.Thread(target=accept_loop, daemon=True).start()
 
 
 def serve_state(state: ArenaState) -> None:
-    class ReusableThreadingTCPServer(socketserver.ThreadingTCPServer):
+    class ReusableThreadingTCPServer(BoundedThreadingMixIn, socketserver.TCPServer):
         allow_reuse_address = True
+        transport_name = "web-arena-state"
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
@@ -165,7 +172,9 @@ def serve_state(state: ArenaState) -> None:
                 self.end_headers()
                 return
 
-            body = json.dumps(state.snapshot(), ensure_ascii=False).encode("utf-8")
+            snapshot = state.snapshot()
+            snapshot["transport"] = self.server.transport_health()
+            body = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -220,11 +229,13 @@ def playwright_worker(state: ArenaState, sync_playwright: Any) -> None:
 
 def handle_action(state: ArenaState, conn: socket.socket) -> None:
     with conn:
-        line = read_line(conn)
-        if not line:
-            return
         try:
+            line = read_line(conn)
+            if not line:
+                return
             action = json.loads(line)
+            if not isinstance(action, dict):
+                raise ValueError("action must be a JSON object")
         except Exception as exc:
             reject_action(state, "InvalidActionJson", f"invalid action JSON: {exc}")
             return
@@ -400,20 +411,6 @@ def assert_allowed_url(url: str) -> None:
     origin = origin_of(url)
     if origin not in ALLOWED_ORIGINS:
         raise ValueError(f"origin not allowlisted: {origin}")
-
-
-def read_line(conn: socket.socket) -> str:
-    chunks: list[bytes] = []
-    while True:
-        chunk = conn.recv(4096)
-        if not chunk:
-            break
-        if b"\n" in chunk:
-            before, _, _ = chunk.partition(b"\n")
-            chunks.append(before)
-            break
-        chunks.append(chunk)
-    return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 def clean_text(text: str) -> str:

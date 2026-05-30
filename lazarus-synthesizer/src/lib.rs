@@ -489,6 +489,12 @@ mod tests {
             .unwrap();
 
         assert!(compiled.text.contains("```json"));
+        assert!(compiled.text.contains("Formal code-generation contract"));
+        assert!(
+            compiled
+                .text
+                .contains("Preserve a pure, deterministic mapping")
+        );
         assert!(compiled.text.contains("com.bank.TransferService.execute"));
         assert!(compiled.text.contains("<truncated>"));
         assert!(!compiled.text.contains("x-extra-header"));

@@ -13,7 +13,9 @@ This document describes the runtime isolation boundary that is implemented by th
 Runtime gate:
 
 - Native `.so` / `.dylib` loading is disabled by default.
-- Set `GENESIS_ALLOW_NATIVE_PLUGINS=1` only when loading trusted local plugins.
+- Native plugins require all three gates: `GENESIS_RUNTIME_PROFILE=development|dev|local|test`, `GENESIS_ALLOW_NATIVE_PLUGINS=1`, and `GENESIS_NATIVE_PLUGIN_TRUST=dev-only|trusted-dev`.
+- `GENESIS_RUNTIME_PROFILE=release|production`, an unset runtime profile, or a missing trust declaration keeps native loading disabled.
+- Set the native gates only when loading trusted local plugins for development or test work.
 - When the gate is closed, `genesis-core` still starts and emits ticks, but it does not watch or load native plugins.
 
 Provided controls:
@@ -31,7 +33,7 @@ Not provided:
 - Protection from undefined behavior inside a plugin.
 - Syscall, filesystem, or network sandboxing.
 
-Policy: this path is for trusted plugins only.
+Policy: this path is for trusted development plugins only. Release and production profiles are Wasm-only for plugins in this repository.
 
 ### Untrusted Plugins
 
@@ -42,7 +44,7 @@ Allowed isolation targets:
 - Wasm artifact execution with fuel limits.
 - A future out-of-process worker boundary with explicit IPC and process lifecycle control.
 
-Policy: reject untrusted code from the in-process FFI loader until an out-of-process or Wasm plugin runtime exists.
+Policy: reject untrusted code from the in-process FFI loader. Third-party plugin ecosystems must use Wasm or a future out-of-process worker boundary, not the in-process native ABI.
 
 ### Lazarus Wasm Artifacts
 

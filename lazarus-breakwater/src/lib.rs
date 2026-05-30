@@ -1,9 +1,19 @@
-use lazarus_contracts::{DecisionIr, LAZARUS_CONTRACT_VERSION};
-use lazarus_shadow_runner::ShadowRequest;
+mod hydration;
+mod state_snapshot;
+
+use lazarus_contracts::LAZARUS_CONTRACT_VERSION;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-use std::collections::BTreeMap;
+
+pub use hydration::{
+    HydratedReplay, HydrationPlan, hydrate_snapshot, hydrate_snapshots, shadow_requests,
+};
+pub use state_snapshot::{
+    DependencyKind, DownstreamDependency, MutationIntent, MutationKind, SnapshotContext,
+    SnapshotLimits, StateSnapshot, StateSnapshotInput, StateSnapshotStatus, UpstreamRequest,
+    project_state_snapshot_to_traffic_snapshot,
+};
 
 pub const DEFAULT_MAX_DEPENDENCY_ROWS: usize = 500;
 pub const DEFAULT_MAX_SNAPSHOT_BYTES: usize = 1024 * 1024;
@@ -23,323 +33,6 @@ pub enum ObservationKind {
     FileWrite,
     NetworkWrite,
     Unknown,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StateSnapshotStatus {
-    Complete,
-    TruncatedInvalid,
-    Dropped,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DependencyKind {
-    JdbcRead,
-    HttpResponse,
-    CacheRead,
-    FileRead,
-    EnvRead,
-    ClockRead,
-    UnknownRead,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MutationKind {
-    DbUpdate,
-    DbInsert,
-    DbDelete,
-    HttpPost,
-    HttpPut,
-    CacheWrite,
-    FileWrite,
-    UnknownWrite,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SnapshotLimits {
-    pub max_dependency_rows: usize,
-    pub max_snapshot_bytes: usize,
-}
-
-impl Default for SnapshotLimits {
-    fn default() -> Self {
-        Self {
-            max_dependency_rows: DEFAULT_MAX_DEPENDENCY_ROWS,
-            max_snapshot_bytes: DEFAULT_MAX_SNAPSHOT_BYTES,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SnapshotContext {
-    pub captured_at_unix_ms: u64,
-    pub epoch_unix_ms: u64,
-    pub locale: Option<String>,
-    pub principal: Option<String>,
-    pub thread_name: Option<String>,
-    pub env: BTreeMap<String, Value>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct UpstreamRequest {
-    pub method: String,
-    pub uri: String,
-    pub headers: BTreeMap<String, String>,
-    pub body: Value,
-    pub raw_body_sha256: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DownstreamDependency {
-    pub dependency_id: String,
-    pub kind: DependencyKind,
-    pub target: String,
-    pub query_or_request: Option<String>,
-    pub rows: Vec<BTreeMap<String, Value>>,
-    pub response: Value,
-    pub deterministic: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MutationIntent {
-    pub intent_id: String,
-    pub kind: MutationKind,
-    pub target: String,
-    pub statement_or_request: Option<String>,
-    pub params: Value,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct StateSnapshot {
-    pub contract_version: u32,
-    pub snapshot_id: String,
-    pub trace_id: String,
-    pub operation: String,
-    pub status: StateSnapshotStatus,
-    pub context: SnapshotContext,
-    #[serde(default)]
-    pub trace_tags: BTreeMap<String, String>,
-    pub upstream: UpstreamRequest,
-    pub downstream_dependencies: Vec<DownstreamDependency>,
-    pub mutation_intents: Vec<MutationIntent>,
-    pub limits: SnapshotLimits,
-    pub snapshot_hash: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct StateSnapshotInput {
-    pub snapshot_id: String,
-    pub trace_id: String,
-    pub operation: String,
-    pub context: SnapshotContext,
-    pub upstream: UpstreamRequest,
-    pub downstream_dependencies: Vec<DownstreamDependency>,
-    pub mutation_intents: Vec<MutationIntent>,
-    pub limits: SnapshotLimits,
-}
-
-impl StateSnapshot {
-    pub fn new(input: StateSnapshotInput) -> Result<Self, String> {
-        let mut snapshot = Self {
-            contract_version: LAZARUS_CONTRACT_VERSION,
-            snapshot_id: input.snapshot_id,
-            trace_id: input.trace_id,
-            operation: input.operation,
-            status: StateSnapshotStatus::Complete,
-            context: input.context,
-            trace_tags: BTreeMap::new(),
-            upstream: input.upstream,
-            downstream_dependencies: input.downstream_dependencies,
-            mutation_intents: input.mutation_intents,
-            limits: input.limits,
-            snapshot_hash: String::new(),
-        };
-        snapshot.validate_without_hash()?;
-        snapshot.snapshot_hash = snapshot.compute_hash()?;
-        Ok(snapshot)
-    }
-
-    pub fn validate_ingestable(&self) -> Result<(), String> {
-        self.validate_hash()?;
-        if self.status != StateSnapshotStatus::Complete {
-            return Err(format!(
-                "state snapshot {} is not complete: {:?}",
-                self.snapshot_id, self.status
-            ));
-        }
-        self.validate_limits()?;
-        self.validate_masking()?;
-        Ok(())
-    }
-
-    pub fn validate_hash(&self) -> Result<(), String> {
-        self.validate_without_hash()?;
-        let actual = self.compute_hash()?;
-        if actual != self.snapshot_hash {
-            return Err(format!(
-                "state snapshot hash mismatch: expected {}, actual {actual}",
-                self.snapshot_hash
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn compute_hash(&self) -> Result<String, String> {
-        let material = StateSnapshotHashMaterial {
-            contract_version: self.contract_version,
-            snapshot_id: &self.snapshot_id,
-            trace_id: &self.trace_id,
-            operation: &self.operation,
-            status: &self.status,
-            context: &self.context,
-            trace_tags: &self.trace_tags,
-            upstream: &self.upstream,
-            downstream_dependencies: &self.downstream_dependencies,
-            mutation_intents: &self.mutation_intents,
-            limits: &self.limits,
-        };
-        stable_hash(&material)
-    }
-
-    fn validate_without_hash(&self) -> Result<(), String> {
-        if self.contract_version != LAZARUS_CONTRACT_VERSION {
-            return Err(format!(
-                "unsupported state snapshot contract version: {}",
-                self.contract_version
-            ));
-        }
-        require_non_empty("snapshot_id", &self.snapshot_id)?;
-        require_non_empty("trace_id", &self.trace_id)?;
-        require_non_empty("operation", &self.operation)?;
-        require_non_empty("upstream.method", &self.upstream.method)?;
-        require_non_empty("upstream.uri", &self.upstream.uri)?;
-        if self.limits.max_dependency_rows == 0 {
-            return Err("limits.max_dependency_rows must be > 0".to_string());
-        }
-        if self.limits.max_snapshot_bytes == 0 {
-            return Err("limits.max_snapshot_bytes must be > 0".to_string());
-        }
-        for dependency in &self.downstream_dependencies {
-            require_non_empty("dependency.dependency_id", &dependency.dependency_id)?;
-            require_non_empty("dependency.target", &dependency.target)?;
-            if !dependency.deterministic {
-                return Err(format!(
-                    "dependency {} was not captured deterministically",
-                    dependency.dependency_id
-                ));
-            }
-        }
-        for intent in &self.mutation_intents {
-            require_non_empty("mutation.intent_id", &intent.intent_id)?;
-            require_non_empty("mutation.target", &intent.target)?;
-        }
-        Ok(())
-    }
-
-    fn validate_limits(&self) -> Result<(), String> {
-        let bytes = serde_json::to_vec(self).map_err(|error| error.to_string())?;
-        if bytes.len() > self.limits.max_snapshot_bytes {
-            return Err(format!(
-                "state snapshot {} exceeds max_snapshot_bytes: {} > {}",
-                self.snapshot_id,
-                bytes.len(),
-                self.limits.max_snapshot_bytes
-            ));
-        }
-        for dependency in &self.downstream_dependencies {
-            if dependency.rows.len() > self.limits.max_dependency_rows {
-                return Err(format!(
-                    "dependency {} exceeds max_dependency_rows: {} > {}",
-                    dependency.dependency_id,
-                    dependency.rows.len(),
-                    self.limits.max_dependency_rows
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_masking(&self) -> Result<(), String> {
-        assert_masked_value(
-            "context.env",
-            &serde_json::to_value(&self.context.env).unwrap(),
-        )?;
-        assert_masked_value(
-            "upstream.headers",
-            &serde_json::to_value(&self.upstream.headers).unwrap(),
-        )?;
-        assert_masked_value("upstream.body", &self.upstream.body)?;
-        for dependency in &self.downstream_dependencies {
-            assert_masked_value(
-                &format!("dependency.{}.rows", dependency.dependency_id),
-                &serde_json::to_value(&dependency.rows).map_err(|error| error.to_string())?,
-            )?;
-            assert_masked_value(
-                &format!("dependency.{}.response", dependency.dependency_id),
-                &dependency.response,
-            )?;
-        }
-        for intent in &self.mutation_intents {
-            assert_masked_value(
-                &format!("mutation.{}.params", intent.intent_id),
-                &intent.params,
-            )?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Serialize)]
-struct StateSnapshotHashMaterial<'a> {
-    contract_version: u32,
-    snapshot_id: &'a str,
-    trace_id: &'a str,
-    operation: &'a str,
-    status: &'a StateSnapshotStatus,
-    context: &'a SnapshotContext,
-    trace_tags: &'a BTreeMap<String, String>,
-    upstream: &'a UpstreamRequest,
-    downstream_dependencies: &'a [DownstreamDependency],
-    mutation_intents: &'a [MutationIntent],
-    limits: &'a SnapshotLimits,
-}
-
-pub fn project_state_snapshot_to_traffic_snapshot(
-    snapshot: &StateSnapshot,
-) -> Result<TrafficSnapshot, String> {
-    snapshot.validate_ingestable()?;
-    let observations = snapshot
-        .downstream_dependencies
-        .iter()
-        .map(|dependency| ContextObservation {
-            kind: match dependency.kind {
-                DependencyKind::JdbcRead => ObservationKind::DatabaseRead,
-                DependencyKind::HttpResponse => ObservationKind::NetworkResponse,
-                DependencyKind::CacheRead
-                | DependencyKind::EnvRead
-                | DependencyKind::ClockRead
-                | DependencyKind::UnknownRead => ObservationKind::EnvRead,
-                DependencyKind::FileRead => ObservationKind::FileRead,
-            },
-            target: dependency.target.clone(),
-            value: if dependency.rows.is_empty() {
-                dependency.response.clone()
-            } else {
-                serde_json::to_value(&dependency.rows).expect("rows serialize")
-            },
-            deterministic: dependency.deterministic,
-        })
-        .collect::<Vec<_>>();
-    TrafficSnapshot::new(
-        snapshot.snapshot_id.clone(),
-        snapshot.operation.clone(),
-        snapshot.context.captured_at_unix_ms,
-        snapshot.upstream.body.clone(),
-        observations,
-    )
 }
 
 impl ObservationKind {
@@ -486,132 +179,14 @@ struct SnapshotHashMaterial<'a> {
     observations: &'a [ContextObservation],
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HydrationPlan {
-    pub operation: String,
-    pub bindings: BTreeMap<String, String>,
-    pub require_replay_safe_observations: bool,
-    pub enforce_input_domain: bool,
-}
-
-impl HydrationPlan {
-    pub fn new(operation: impl Into<String>, bindings: BTreeMap<String, String>) -> Self {
-        Self {
-            operation: operation.into(),
-            bindings,
-            require_replay_safe_observations: true,
-            enforce_input_domain: true,
-        }
-    }
-
-    pub fn validate_for_ir(&self, ir: &DecisionIr) -> Result<(), String> {
-        require_non_empty("hydration operation", &self.operation)?;
-        ir.validate_bounded()?;
-        for name in ir
-            .input_domains
-            .keys()
-            .filter(|name| name.as_str() != "__unit")
-        {
-            let pointer = self
-                .bindings
-                .get(name)
-                .ok_or_else(|| format!("missing hydration binding for input: {name}"))?;
-            if !pointer.starts_with('/') {
-                return Err(format!(
-                    "hydration binding for {name} must be a JSON Pointer, got {pointer}"
-                ));
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct HydratedReplay {
-    pub snapshot_id: String,
-    pub snapshot_hash: String,
-    pub request: ShadowRequest,
-    pub payload_hash: String,
-}
-
-pub fn hydrate_snapshot(
-    snapshot: &TrafficSnapshot,
-    ir: &DecisionIr,
-    plan: &HydrationPlan,
-) -> Result<HydratedReplay, String> {
-    plan.validate_for_ir(ir)?;
-    if plan.require_replay_safe_observations {
-        snapshot.validate_replay_safe()?;
-    } else {
-        snapshot.validate_hash()?;
-    }
-
-    let root = snapshot.pointer_root();
-    let mut payload = Map::new();
-    for (name, domain) in &ir.input_domains {
-        if name == "__unit" {
-            payload.insert(name.clone(), Value::from(0));
-            continue;
-        }
-        let pointer = plan
-            .bindings
-            .get(name)
-            .ok_or_else(|| format!("missing hydration binding for input: {name}"))?;
-        let value = root
-            .pointer(pointer)
-            .ok_or_else(|| format!("snapshot pointer not found for {name}: {pointer}"))?;
-        let value = value
-            .as_i64()
-            .ok_or_else(|| format!("hydration value for {name} must be i64"))?;
-        if plan.enforce_input_domain && !domain.contains(&value) {
-            return Err(format!(
-                "hydrated value {value} for {name} is outside verified input domain"
-            ));
-        }
-        payload.insert(name.clone(), Value::from(value));
-    }
-
-    let payload = Value::Object(payload);
-    let request = ShadowRequest {
-        request_id: snapshot.snapshot_id.clone(),
-        operation: plan.operation.clone(),
-        payload: payload.clone(),
-    };
-    request.validate()?;
-    Ok(HydratedReplay {
-        snapshot_id: snapshot.snapshot_id.clone(),
-        snapshot_hash: snapshot.snapshot_hash.clone(),
-        payload_hash: stable_hash(&payload)?,
-        request,
-    })
-}
-
-pub fn hydrate_snapshots(
-    snapshots: &[TrafficSnapshot],
-    ir: &DecisionIr,
-    plan: &HydrationPlan,
-) -> Result<Vec<HydratedReplay>, String> {
-    snapshots
-        .iter()
-        .map(|snapshot| hydrate_snapshot(snapshot, ir, plan))
-        .collect()
-}
-
-pub fn shadow_requests(replays: &[HydratedReplay]) -> Vec<ShadowRequest> {
-    replays
-        .iter()
-        .map(|replay| replay.request.clone())
-        .collect()
-}
-
-fn stable_hash<T: Serialize>(value: &T) -> Result<String, String> {
+pub(crate) fn stable_hash<T: Serialize>(value: &T) -> Result<String, String> {
     let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn require_non_empty(field: &str, value: &str) -> Result<(), String> {
+pub(crate) fn require_non_empty(field: &str, value: &str) -> Result<(), String> {
     if value.trim().is_empty() {
         Err(format!("{field} must not be empty"))
     } else {
@@ -619,40 +194,11 @@ fn require_non_empty(field: &str, value: &str) -> Result<(), String> {
     }
 }
 
-fn assert_masked_value(path: &str, value: &Value) -> Result<(), String> {
-    match value {
-        Value::Object(map) => {
-            for (key, child) in map {
-                let child_path = format!("{path}.{key}");
-                if is_sensitive_key(key) && child != "***" {
-                    return Err(format!("sensitive field must be masked: {child_path}"));
-                }
-                assert_masked_value(&child_path, child)?;
-            }
-        }
-        Value::Array(items) => {
-            for (index, child) in items.iter().enumerate() {
-                assert_masked_value(&format!("{path}[{index}]"), child)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn is_sensitive_key(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    [
-        "password", "passwd", "token", "secret", "card", "ssn", "pin",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lazarus_contracts::DecisionExpr;
+    use lazarus_contracts::{DecisionExpr, DecisionIr};
+    use std::collections::BTreeMap;
 
     #[test]
     fn hydrates_snapshot_payload_into_shadow_request() {

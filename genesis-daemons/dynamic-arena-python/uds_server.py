@@ -4,11 +4,15 @@ import json
 import os
 import socket
 import socketserver
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from daemon_transport import BoundedThreadingMixIn, ClientThreadLimiter, read_line
 from arena_engine import DynamicArenaEngine
 
 
@@ -17,11 +21,13 @@ STATE_PORT = int(os.environ.get("GENESIS_DYNAMIC_ARENA_PORT", "4781"))
 ACTION_SOCKET_PATH = os.environ.get(
     "GENESIS_DYNAMIC_ACT_SOCKET", "/tmp/genesis_dynamic_act.sock"
 )
+CLIENT_THREADS = ClientThreadLimiter("dynamic-arena", connection_arg_index=1)
 
 
 def serve_state(engine: DynamicArenaEngine) -> None:
-    class ReusableThreadingTCPServer(socketserver.ThreadingTCPServer):
+    class ReusableThreadingTCPServer(BoundedThreadingMixIn, socketserver.TCPServer):
         allow_reuse_address = True
+        transport_name = "dynamic-arena-state"
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
@@ -30,7 +36,9 @@ def serve_state(engine: DynamicArenaEngine) -> None:
                 self.end_headers()
                 return
 
-            body = json.dumps(engine.read_snapshot(), ensure_ascii=False).encode("utf-8")
+            snapshot = engine.read_snapshot()
+            snapshot["transport"] = self.server.transport_health()
+            body = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -59,7 +67,7 @@ def start_action_socket(engine: DynamicArenaEngine) -> None:
     def accept_loop() -> None:
         while True:
             conn, _ = server.accept()
-            threading.Thread(target=handle_action, args=(engine, conn), daemon=True).start()
+            CLIENT_THREADS.spawn(handle_action, engine, conn)
 
     threading.Thread(target=accept_loop, daemon=True).start()
 
@@ -69,6 +77,8 @@ def handle_action(engine: DynamicArenaEngine, conn: socket.socket) -> None:
         try:
             raw = read_line(conn)
             action = json.loads(raw)
+            if not isinstance(action, dict):
+                raise ValueError("action must be a JSON object")
         except Exception as exc:
             write_line(conn, {"status": "error", "reason": f"invalid action: {exc}"})
             return
@@ -78,20 +88,6 @@ def handle_action(engine: DynamicArenaEngine, conn: socket.socket) -> None:
             write_line(conn, {"status": "queued"})
         else:
             write_line(conn, {"status": "rejected", "reason": "ActionQueueFull"})
-
-
-def read_line(conn: socket.socket) -> str:
-    chunks: list[bytes] = []
-    while True:
-        chunk = conn.recv(4096)
-        if not chunk:
-            break
-        if b"\n" in chunk:
-            before, _, _ = chunk.partition(b"\n")
-            chunks.append(before)
-            break
-        chunks.append(chunk)
-    return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 def write_line(conn: socket.socket, payload: dict[str, Any]) -> None:

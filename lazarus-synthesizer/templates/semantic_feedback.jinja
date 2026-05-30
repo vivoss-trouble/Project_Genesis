@@ -1,6 +1,14 @@
 Fix the Rust source so Lazarus semantic diff passes.
 Return only one Rust source file. Do not hard-code individual visible test case IDs or snapshot IDs.
 
+Formal semantic contract:
+- Explain semantics through code structure, not visible-case replay.
+- Infer only from the legacy Java source, Input order, state snapshots, behavior cases, and prior semantic feedback.
+- Preserve deterministic i64 input-to-output behavior for normal, boundary, and unmatched inputs.
+- Use explicit branch defaults and saturating arithmetic where overflow behavior is not proven by evidence.
+- Do not introduce hidden mutable state, heap allocation, clocks, randomness, I/O, external calls, or unsafe blocks.
+- Keep complexity proportional to the legacy logic and the minimal correction required by the mismatch.
+
 Hard ABI contract:
 - The file is compiled directly with rustc, not Cargo.
 - Do not use external crates. Do not use serde or serde_json.

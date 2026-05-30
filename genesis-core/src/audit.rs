@@ -173,20 +173,24 @@ pub struct AuditHealth {
 
 impl AuditLogger {
     pub fn new(capacity: usize) -> Self {
+        Self::try_new(capacity).expect("致命错误：无法启动审计线程")
+    }
+
+    pub fn try_new(capacity: usize) -> std::io::Result<Self> {
+        Self::build(capacity, audit_log_path(), audit_max_bytes())
+    }
+
+    fn build(capacity: usize, audit_path: PathBuf, audit_max_bytes: u64) -> std::io::Result<Self> {
         let (sender, receiver) = sync_channel::<AuditEvent>(capacity);
         let dropped_count = Arc::new(AtomicU64::new(0));
         let worker_dropped_count = dropped_count.clone();
         let health = Arc::new(AuditHealthCounters::default());
         let worker_health = health.clone();
-        let audit_path = audit_log_path();
-        let audit_max_bytes = audit_max_bytes();
+        let mut writer = open_audit_writer(&audit_path)?;
 
         thread::Builder::new()
             .name("Genesis-Audit-Worker".to_string())
             .spawn(move || {
-                let mut writer =
-                    open_audit_writer(&audit_path).expect("致命错误：无法打开 audit.jsonl");
-
                 while let Ok(event) = receiver.recv() {
                     let dropped = worker_dropped_count.swap(0, Ordering::Relaxed);
                     if dropped > 0 {
@@ -216,7 +220,7 @@ impl AuditLogger {
                     write_record(&mut writer, &record, &worker_health);
                 }
             })
-            .expect("无法启动审计线程");
+            .map(|_| ())?;
 
         let logger = Self {
             sender,
@@ -231,7 +235,7 @@ impl AuditLogger {
             });
         }
 
-        logger
+        Ok(logger)
     }
 
     pub fn log(&self, event: AuditEvent) {
@@ -480,5 +484,25 @@ mod tests {
         assert_eq!(health.queued_events, 1);
         assert_eq!(health.dropped_events, 0);
         assert_eq!(health.disconnected_drops, 0);
+    }
+
+    #[test]
+    fn try_new_returns_error_when_audit_path_parent_is_not_directory() {
+        let root =
+            std::env::temp_dir().join(format!("genesis-audit-open-fail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let parent_file = root.join("not-a-directory");
+        fs::write(&parent_file, b"occupied").unwrap();
+        let error = match AuditLogger::build(1, parent_file.join("audit.jsonl"), 1024) {
+            Ok(_) => panic!("audit logger started with invalid audit path"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotADirectory
+        ));
+        let _ = fs::remove_dir_all(root);
     }
 }

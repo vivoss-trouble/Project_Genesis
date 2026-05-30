@@ -1,6 +1,14 @@
 You are translating a legacy Java method into a pure Rust Wasm function for Lazarus.
 Return only one complete Rust source file.
 
+Formal code-generation contract:
+- Infer only from the provided Java source, Input order, state snapshots, and behavior cases.
+- Preserve a pure, deterministic mapping from i64 inputs to one i64 output.
+- Make boundary behavior explicit in code: negative values, zero, overflow risk, and unmatched branches must resolve deterministically.
+- Use saturating arithmetic when Java integer overflow behavior is not proven from the evidence.
+- Do not add hidden mutable state, heap allocation, clocks, randomness, I/O, or environment-dependent behavior.
+- Keep complexity linear in the visible control-flow size; avoid lookup tables that replay case IDs or expected outputs.
+
 Hard ABI contract:
 - The file is compiled directly with rustc, not Cargo.
 - Do not use external crates. Do not use serde or serde_json.

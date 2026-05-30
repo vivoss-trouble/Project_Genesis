@@ -3,6 +3,13 @@ Return only one Rust source file. Keep the exported function name exactly: {{ fu
 If prior feedback mentions overfitting or literal replay, do not return the sample expected constant directly.
 Derive the result from input arguments or the legacy control flow instead of replaying Behavior case outputs.
 
+Formal repair contract:
+- Change only what is needed to satisfy the compiler, source policy, ABI, and provided evidence.
+- Preserve deterministic failure behavior: no panics except the required panic_handler loop, no unwrap/expect, no unreachable unsafe paths.
+- Make malformed or out-of-range arithmetic safe with explicit branches or saturating operations.
+- Do not invent schemas, APIs, external state, hidden caches, or behavior not supported by the Java source and cases.
+- Keep complexity bounded by the legacy control-flow shape; do not expand into large literal replay tables.
+
 Hard ABI contract:
 - The file is compiled directly with rustc, not Cargo.
 - Do not use external crates. Do not use serde or serde_json.
