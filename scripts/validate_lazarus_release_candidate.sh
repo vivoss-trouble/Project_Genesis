@@ -23,6 +23,28 @@ export RUN_LAZARUS_STRESS="${RUN_LAZARUS_STRESS:-1}"
 export LAZARUS_STRESS_ITERATIONS="${LAZARUS_STRESS_ITERATIONS:-100}"
 export CHECK_GIT_CLEAN="${CHECK_GIT_CLEAN:-1}"
 
+require_env() {
+  local name="$1"
+  if [ -z "${!name:-}" ]; then
+    echo "[release_candidate] ${name} is required for strict release validation" >&2
+    exit 2
+  fi
+}
+
+if [ "$RUN_JAVA_DEPENDENCY_SCAN" = "1" ]; then
+  require_env NVD_API_KEY
+fi
+
+if [ "$RUN_LOCAL_LM_SMOKE" = "1" ]; then
+  require_env LAZARUS_LM_ENDPOINT
+  require_env LAZARUS_LM_MODEL
+fi
+
+if [ "$RUN_LAZARUS_STRESS" = "1" ] && [ "$LAZARUS_STRESS_ITERATIONS" -lt 100 ]; then
+  echo "[release_candidate] LAZARUS_STRESS_ITERATIONS must be >= 100 for strict release validation" >&2
+  exit 2
+fi
+
 bash "$ROOT/scripts/validate_all.sh" 2>&1 | tee "$LOG_PATH"
 
 FINISHED_AT_MS="$(python3 - <<'PY'
