@@ -100,27 +100,27 @@ fn verify_dynamic_action(
         "last_verdict": verdict,
     });
 
-    if let Some(expected) = expected_action_id {
-        if verdict_action_id != Some(expected) {
-            return (
-                VerificationResult::Failed {
-                    reason: format!(
-                        "dynamic_verdict_action_mismatch:expected={expected}:actual={}",
-                        verdict_action_id.unwrap_or("<missing>")
-                    ),
-                },
-                json!({
-                    "policy": "dynamic_last_verdict",
-                    "target": target_id,
-                    "expected_action_id": expected,
-                    "verdict_action_id": verdict_action_id,
-                    "verdict_target_id": verdict_target,
-                    "failure_kind": "DynamicVerdictActionMismatch",
-                    "warning_kind": Value::Null,
-                    "last_verdict": verdict,
-                }),
-            );
-        }
+    if let Some(expected) = expected_action_id
+        && verdict_action_id != Some(expected)
+    {
+        return (
+            VerificationResult::Failed {
+                reason: format!(
+                    "dynamic_verdict_action_mismatch:expected={expected}:actual={}",
+                    verdict_action_id.unwrap_or("<missing>")
+                ),
+            },
+            json!({
+                "policy": "dynamic_last_verdict",
+                "target": target_id,
+                "expected_action_id": expected,
+                "verdict_action_id": verdict_action_id,
+                "verdict_target_id": verdict_target,
+                "failure_kind": "DynamicVerdictActionMismatch",
+                "warning_kind": Value::Null,
+                "last_verdict": verdict,
+            }),
+        );
     }
 
     match status {

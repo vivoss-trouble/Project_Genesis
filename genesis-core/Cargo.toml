@@ -11,6 +11,7 @@ libloading = "0.8"
 notify = "6.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+socket2 = "0.6"
 
 # 【思想钢印】将我们写的神圣契约注入微核的脑干
 genesis-contracts = { path = "../genesis-contracts" }

@@ -4,3 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+lazarus-artifact-runner = { path = "../lazarus-artifact-runner" }
+lazarus-breakwater = { path = "../lazarus-breakwater" }
+lazarus-contracts = { path = "../lazarus-contracts" }
+lazarus-converter-pipeline = { path = "../lazarus-converter-pipeline" }
+lazarus-cutover-gate = { path = "../lazarus-cutover-gate" }
+lazarus-evidence-pack = { path = "../lazarus-evidence-pack" }
+lazarus-orchestrator = { path = "../lazarus-orchestrator" }
+lazarus-promotion-controller = { path = "../lazarus-promotion-controller" }
+lazarus-shadow-runner = { path = "../lazarus-shadow-runner" }
+lazarus-synthesizer = { path = "../lazarus-synthesizer" }
+lazarus-verification-pipeline = { path = "../lazarus-verification-pipeline" }
+serde_json = "1.0"

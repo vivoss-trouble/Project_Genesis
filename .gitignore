@@ -5,6 +5,7 @@
 **/target/
 
 # Local Python environments and caches
+/.cache/
 /.venv-llm/
 /.token-counter/
 __pycache__/
@@ -12,11 +13,14 @@ __pycache__/
 
 # Runtime state and generated replay artifacts
 /.genesis-state/
+**/.genesis-state/
 /.genesis-state-replay/
 /evidence_packs/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+*.pyc
+.pytest_cache/
 
 # Hot-loaded plugin binaries are rebuilt from source.
 /genesis-plugins/*.dylib

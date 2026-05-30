@@ -838,16 +838,17 @@ mod macos {
         };
         let capture_logical_width = width as f64 / capture_scale_x.unwrap_or(1.0);
         let capture_logical_height = height as f64 / capture_scale_y.unwrap_or(1.0);
-        let (marker_detection, marker_candidates, marker_sample) = analyze_marker(
-            image,
-            width,
-            height,
-            bytes_per_row,
-            bits_per_pixel,
-            capture_scale_x,
-            capture_scale_y,
-            capture_logical_height,
-        );
+        let (marker_detection, marker_candidates, marker_sample) =
+            analyze_marker(MarkerAnalysisInput {
+                image,
+                width,
+                height,
+                bytes_per_row,
+                bits_per_pixel,
+                scale_x: capture_scale_x,
+                scale_y: capture_scale_y,
+                logical_height: capture_logical_height,
+            });
         unsafe {
             CFRelease(image.cast_const());
         }
@@ -916,7 +917,7 @@ mod macos {
         }
     }
 
-    fn analyze_marker(
+    struct MarkerAnalysisInput {
         image: CGImageRef,
         width: usize,
         height: usize,
@@ -925,16 +926,20 @@ mod macos {
         scale_x: Option<f64>,
         scale_y: Option<f64>,
         logical_height: f64,
+    }
+
+    fn analyze_marker(
+        input: MarkerAnalysisInput,
     ) -> (
         Option<MarkerDetection>,
         Vec<MarkerCandidate>,
         Option<MarkerSample>,
     ) {
-        if bits_per_pixel != 32 {
+        if input.bits_per_pixel != 32 {
             return (None, Vec::new(), None);
         }
 
-        let provider = unsafe { CGImageGetDataProvider(image) };
+        let provider = unsafe { CGImageGetDataProvider(input.image) };
         if provider.is_null() {
             return (None, Vec::new(), None);
         }
@@ -953,11 +958,15 @@ mod macos {
             std::slice::from_raw_parts(ptr, len as usize)
         };
 
-        let raw_candidates =
-            detect_marker_candidates_from_bgra_like_buffer(bytes, width, height, bytes_per_row);
+        let raw_candidates = detect_marker_candidates_from_bgra_like_buffer(
+            bytes,
+            input.width,
+            input.height,
+            input.bytes_per_row,
+        );
         let marker_sample = expected_marker_sample_point().and_then(|point| {
-            let scale_x = scale_x?;
-            let scale_y = scale_y?;
+            let scale_x = input.scale_x?;
+            let scale_y = input.scale_y?;
             if scale_x <= 0.0 || scale_y <= 0.0 {
                 return None;
             }
@@ -965,9 +974,9 @@ mod macos {
             let pixel_y = (point.y * scale_y).round().max(0.0) as usize;
             sample_pixel_from_bgra_like_buffer(
                 bytes,
-                width,
-                height,
-                bytes_per_row,
+                input.width,
+                input.height,
+                input.bytes_per_row,
                 pixel_x,
                 pixel_y,
                 point,
@@ -977,7 +986,7 @@ mod macos {
             CFRelease(data.cast_const());
         }
 
-        let (Some(scale_x), Some(scale_y)) = (scale_x, scale_y) else {
+        let (Some(scale_x), Some(scale_y)) = (input.scale_x, input.scale_y) else {
             return (None, Vec::new(), marker_sample);
         };
         if scale_x <= 0.0 || scale_y <= 0.0 {
@@ -999,7 +1008,7 @@ mod macos {
                     },
                     appkit_logical_center: LogicalPoint {
                         x: coregraphics_x,
-                        y: logical_height - coregraphics_y,
+                        y: input.logical_height - coregraphics_y,
                     },
                     bbox: marker.bbox,
                     pixel_count: marker.pixel_count,

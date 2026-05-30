@@ -1,0 +1,35 @@
+Fix the Rust source so Lazarus semantic diff passes.
+Return only one Rust source file. Do not hard-code individual visible test case IDs or snapshot IDs.
+
+Hard ABI contract:
+- The file is compiled directly with rustc, not Cargo.
+- Do not use external crates. Do not use serde or serde_json.
+- Do not parse JSON. Inputs are passed as i64 function arguments in Input order.
+- The exported function must be exactly:
+  #[unsafe(no_mangle)]
+  pub extern "C" fn {{ function_name }}(<each input from Input order as i64>) -> i64
+- Return the raw i64 business result. Lazarus wraps it as {"value": result}.
+- Include #![no_std] and a panic_handler.
+- Do not include tests, main, explanations, markdown outside the code block, files, network, processes, clocks, random, OS APIs, heap allocation, or unsafe blocks.
+
+Input order JSON: {{ input_order_json }}
+
+Prior semantic feedback:
+```json
+{{ prior_feedback_json }}
+```
+
+Minified state snapshots:
+```json
+{{ snapshots_json }}
+```
+
+Behavior cases:
+```json
+{{ behavior_cases_json }}
+```
+
+Legacy Java source:
+```java
+{{ legacy_source }}
+```

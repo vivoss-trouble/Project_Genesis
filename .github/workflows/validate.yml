@@ -1,0 +1,58 @@
+name: Validate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  rust-python:
+    name: Rust and Python baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - name: Validate workspace
+        env:
+          RUN_JAVA_PROBE: "0"
+        run: bash scripts/validate_all.sh
+
+  java-probe:
+    name: Java probe validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Java probe
+        run: bash scripts/validate_lazarus_java_probe.sh
+
+  java-dependency-scan:
+    name: Java dependency CVE scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan Java dependencies
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          if [ -z "$NVD_API_KEY" ]; then
+            echo "Skipping dependency scan because NVD_API_KEY is not configured."
+            exit 0
+          fi
+          bash scripts/validate_lazarus_java_dependency_scan.sh
+
+  lifecycle-stress:
+    name: Lazarus lifecycle stress
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - name: Run bounded lifecycle stress
+        env:
+          LAZARUS_STRESS_ITERATIONS: "5"
+        run: bash scripts/validate_lazarus_stress.sh

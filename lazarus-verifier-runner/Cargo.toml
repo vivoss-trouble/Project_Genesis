@@ -1,0 +1,9 @@
+[package]
+name = "lazarus-verifier-runner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lazarus-contracts = { path = "../lazarus-contracts" }
+lazarus-verifier-bridge = { path = "../lazarus-verifier-bridge" }
+serde_json = "1.0"

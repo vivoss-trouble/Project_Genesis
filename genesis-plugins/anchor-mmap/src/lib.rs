@@ -35,6 +35,7 @@ impl AnchorPlugin {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(STATE_FILE)
             .expect("failed to open anchor mmap file");
 
@@ -125,7 +126,7 @@ impl GenesisPlugin for AnchorPlugin {
         state.tick_count += 1;
         state.last_timestamp = ctx.timestamp_ms;
         state.recent_payload = String::from_utf8_lossy(payload).into_owned();
-        if state.tick_count % 10 == 0 {
+        if state.tick_count.is_multiple_of(10) {
             state.entropy_level -= 1.0;
         } else {
             state.entropy_level += 0.2;
@@ -146,6 +147,12 @@ impl GenesisPlugin for AnchorPlugin {
             )
             .into_bytes(),
         )
+    }
+}
+
+impl Default for AnchorPlugin {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -1,0 +1,43 @@
+You are translating a legacy Java method into a pure Rust Wasm function for Lazarus.
+Return only one complete Rust source file.
+
+Hard ABI contract:
+- The file is compiled directly with rustc, not Cargo.
+- Do not use external crates. Do not use serde or serde_json.
+- Do not parse JSON. Inputs are passed as i64 function arguments in Input order.
+- The exported function must be exactly:
+  #[unsafe(no_mangle)]
+  pub extern "C" fn {{ function_name }}(<each input from Input order as i64>) -> i64
+- Return the raw i64 business result. Lazarus wraps it as {"value": result}.
+- Include #![no_std] and a panic_handler.
+- Do not include tests, main, explanations, markdown outside the code block, files, network, processes, clocks, random, OS APIs, heap allocation, or unsafe blocks.
+
+Function name: {{ function_name }}
+Input order JSON: {{ input_order_json }}
+
+Legacy Java source:
+```java
+{{ legacy_source }}
+```
+
+Minified state snapshots:
+```json
+{{ snapshots_json }}
+```
+
+Behavior cases:
+```json
+{{ behavior_cases_json }}
+```
+
+Expected shape for one input named id:
+```rust
+#![no_std]
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn compute(id: i64) -> i64 {
+    id
+}
+```

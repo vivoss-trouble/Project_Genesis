@@ -10,6 +10,12 @@ impl DummyPlugin {
     }
 }
 
+impl Default for DummyPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GenesisPlugin for DummyPlugin {
     fn name(&self) -> &'static str {
         "shield-gateway"

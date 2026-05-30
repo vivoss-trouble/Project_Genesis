@@ -174,6 +174,12 @@ impl BrainPlugin {
     }
 }
 
+impl Default for BrainPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GenesisPlugin for BrainPlugin {
     fn name(&self) -> &'static str {
         "brain-llm"

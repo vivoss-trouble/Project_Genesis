@@ -55,6 +55,7 @@ impl GenesisKernel {
     }
 
     pub fn load_plugin(&mut self, path: &str) -> Result<(), String> {
+        self.reap_retired_plugins();
         unsafe {
             let lib = Library::new(path).map_err(|e| e.to_string())?;
 
@@ -90,6 +91,7 @@ impl GenesisKernel {
     }
 
     pub fn reload_plugin(&mut self, path: &str) -> Result<(), String> {
+        self.reap_retired_plugins();
         if let Some(mut plugin) = self.plugins.remove(path) {
             plugin.worker.shutdown();
             plugin.worker.retire();
@@ -99,6 +101,7 @@ impl GenesisKernel {
     }
 
     pub fn trigger_all(&mut self, tick_id: u64, payload: &str) {
+        self.reap_retired_plugins();
         if self.plugins.is_empty() {
             println!("[突触传导] 🫀 脉冲跳动... 但暂无器官接入。");
             return;
@@ -107,7 +110,7 @@ impl GenesisKernel {
         let act_dispatcher = self.act_dispatcher.clone();
         let auditor = self.auditor.clone();
         let allow_plan_draft = self.active_plan.is_none();
-        let allow_action_dispatch = self
+        let mut allow_action_dispatch = self
             .active_plan
             .as_ref()
             .is_none_or(|plan| plan.awaiting_action_id.is_none());
@@ -127,6 +130,7 @@ impl GenesisKernel {
                 BrainDispatch::Plan(plan) => drafted_plan = Some(plan),
                 BrainDispatch::ActionDispatched(action_id) => {
                     dispatched_plan_action = Some(action_id);
+                    allow_action_dispatch = false;
                 }
                 BrainDispatch::None => {}
             }
@@ -147,8 +151,9 @@ impl GenesisKernel {
     ) -> Option<serde_json::Value> {
         let mut latest_failure = None;
         for pending in self.act_dispatcher.take_pending_for_verification(tick_id) {
-            let (result, evidence) =
+            let (result, mut evidence) =
                 verify_pending_action(&pending.action_id, &pending.action, payload);
+            attach_delivery_evidence(&mut evidence, &pending);
             println!(
                 "[Verifier] 🔎 action={} dispatched_tick={} result={:?}",
                 pending.action_id, pending.queued_tick_id, result
@@ -314,6 +319,30 @@ impl GenesisKernel {
             step_index: step.step_index,
             intent: step.intent.clone(),
         });
+    }
+
+    fn reap_retired_plugins(&mut self) {
+        self.retired_plugins
+            .retain_mut(|plugin| !plugin.worker.try_reap());
+    }
+}
+
+fn attach_delivery_evidence(evidence: &mut serde_json::Value, pending: &crate::act::PendingAction) {
+    let delivery = serde_json::json!({
+        "status": pending.delivery_status(),
+        "queued_tick_id": pending.queued_tick_id,
+        "dispatched_at_ms": pending.dispatched_at_ms,
+    });
+    match evidence {
+        serde_json::Value::Object(object) => {
+            object.insert("delivery".to_string(), delivery);
+        }
+        _ => {
+            *evidence = serde_json::json!({
+                "verifier_evidence": evidence,
+                "delivery": delivery,
+            });
+        }
     }
 }
 

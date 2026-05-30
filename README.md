@@ -1,5 +1,26 @@
 # 🌌 Project Genesis (创世纪)
 
+## Lazarus Local LM Smoke
+
+本地 OpenAI-compatible 模型测试说明：
+
+- `docs/lazarus-local-lm-smoke.md`
+- `docs/lazarus-validation-gates.md`
+
+快速执行：
+
+```sh
+LAZARUS_LM_MODEL="<model-id>" scripts/run_lazarus_local_lm_synthesis_smoke.sh
+```
+
+验证门禁：
+
+```sh
+bash scripts/validate_all.sh
+bash scripts/validate_lazarus_pilot_gate.sh
+bash scripts/validate_lazarus_release_candidate.sh
+```
+
 ## 📌 核心定位 (The Blueprint)
 本项目采用 **微核化热插拔插件架构 (Micro-Kernelized Hot-Swappable Plugin Architecture)**。
 - **终极形态**：极简宿主微核 + 动态二进制插件（.so/.dylib）。
@@ -13,7 +34,8 @@
 
 ### 法则一：【绝对隔离】(The Void Kernel)
 - **`genesis-core` (微核大脑)** 内部**严禁**出现任何业务逻辑代码（如用户、支付、订单）。
-- 微核只负责四件事：插件的加载与销毁、内存安全沙箱、事件总线路由、物理热插拔监控。
+- 微核只负责四件事：可信进程内 FFI 插件的加载与销毁、watchdog taint/timeout、事件总线路由、物理热插拔监控。
+- **安全边界声明**：当前 `.so/.dylib` 插件运行在宿主进程内，不是强沙箱；不可信代码必须走 Wasm artifact 或进程外隔离路径。详见 `docs/security-boundary.md`。
 
 ### 法则二：【契约神圣】(Contract is God)
 - 插件与插件之间是一群“瞎子”，**绝对禁止**插件 A 直接引入插件 B 的二进制文件或依赖。
@@ -34,6 +56,14 @@ Project_Genesis/
  ├── genesis-core/         [微核大脑层：事件总线与热插拔 C ABI 加载器]
  ├── genesis-cli/          [人类法杖层：剥离的 RPC 终端控制台]
  └── genesis-plugins/      [义肢仓库：所有独立编译的业务 .so 模块]
+```
+
+Lazarus migration pipeline:
+
+```text
+lazarus-java-probe -> corpus ingest/report -> synthesizer -> Wasm artifact
+    -> shadow runner -> verification/cutover/evidence
+```
 
 ## ⚙️ 核心机制实现约束 (Engineering Constraints)
 
@@ -42,6 +72,7 @@ Project_Genesis/
 1. **【动态加载机制】(FFI / C ABI)**
    - **约束**：`genesis-core` 必须使用 Rust 的 `libloading` 库来加载外部的 `.so` (Linux) 或 `.dylib` (macOS) 二进制插件。
    - **红线**：插件暴露的构造函数必须使用 `#[no_mangle] pub extern "C"` 抹除 Rust 命名粉碎，确保 C 语言级别的 ABI 二进制兼容。
+   - **边界**：该路径只允许可信插件。watchdog 能提供 timeout/taint/reap 和 FFI response 回收，但不能防御恶意插件或 UB 插件破坏宿主内存。
 
 2. **【事件总线机制】(Event Bus)**
    - **约束**：插件间通信必须基于纯异步的发布/订阅（Pub-Sub）模型。使用 Rust 的 `tokio` 异步运行时和 `mpsc`（多生产者单消费者）通道进行内存级消息传递。

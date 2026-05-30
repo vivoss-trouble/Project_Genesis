@@ -1,13 +1,16 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use socket2::{Domain, SockAddr, Socket, Type};
 use std::collections::VecDeque;
 use std::io::Write;
+use std::os::fd::{FromRawFd, IntoRawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::thread;
+use std::time::Duration;
 
 use crate::audit::{AuditEvent, AuditLogger};
 
@@ -26,6 +29,8 @@ const DYNAMIC_ACTUATOR_SOCKET_ENV: &str = "GENESIS_DYNAMIC_ACT_SOCKET";
 pub const MAX_VERIFIABLE_WAIT_MS: u64 = 2_000;
 pub const COORDINATE_ABS_LIMIT: f64 = 1_000_000.0;
 pub const TARGET_ID_MAX_LEN: usize = 64;
+const ACTUATOR_CONNECT_TIMEOUT: Duration = Duration::from_millis(10);
+const ACTUATOR_WRITE_TIMEOUT: Duration = Duration::from_millis(10);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
@@ -143,28 +148,72 @@ pub struct PendingAction {
     pub action_id: String,
     pub queued_tick_id: u64,
     pub source_tick_id: u64,
-    #[allow(dead_code)]
     pub dispatched_at_ms: u64,
-    pub delivery_status: DeliveryStatus,
+    delivery_status: Arc<AtomicU8>,
     pub action: GenesisAction,
 }
 
 /// 区分入队与真实投递，避免审计链混淆。
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeliveryStatus {
     Queued,
     Sent,
     Fallback,
 }
 
+impl PendingAction {
+    pub fn delivery_status(&self) -> DeliveryStatus {
+        DeliveryStatus::from_u8(self.delivery_status.load(Ordering::Acquire))
+    }
+
+    fn is_delivery_terminal(&self) -> bool {
+        self.delivery_status().is_terminal()
+    }
+}
+
+impl DeliveryStatus {
+    fn as_u8(self) -> u8 {
+        match self {
+            DeliveryStatus::Queued => 0,
+            DeliveryStatus::Sent => 1,
+            DeliveryStatus::Fallback => 2,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => DeliveryStatus::Sent,
+            2 => DeliveryStatus::Fallback,
+            _ => DeliveryStatus::Queued,
+        }
+    }
+
+    fn is_terminal(self) -> bool {
+        matches!(self, DeliveryStatus::Sent | DeliveryStatus::Fallback)
+    }
+}
+
 impl ActDispatcher {
     pub fn new(queue_capacity: usize, auditor: AuditLogger) -> Self {
         let (sender, receiver) = sync_channel::<ActionCommand>(queue_capacity);
         let worker_auditor = auditor.clone();
+        let pending_actions = Arc::new(Mutex::new(VecDeque::<PendingAction>::new()));
+        let worker_pending_actions = pending_actions.clone();
 
         thread::spawn(move || {
             while let Ok(command) = receiver.recv() {
-                execute_action(command, &worker_auditor);
+                let action_id = command.action_id.clone();
+                let delivery_status = execute_action(command, &worker_auditor);
+                if let Ok(mut pending) = worker_pending_actions.lock()
+                    && let Some(action) = pending
+                        .iter_mut()
+                        .find(|action| action.action_id == action_id)
+                {
+                    action
+                        .delivery_status
+                        .store(delivery_status.as_u8(), Ordering::Release);
+                }
             }
         });
 
@@ -172,7 +221,7 @@ impl ActDispatcher {
             sender,
             auditor,
             next_sequence: Arc::new(AtomicU64::new(1)),
-            pending_actions: Arc::new(Mutex::new(VecDeque::new())),
+            pending_actions,
         }
     }
 
@@ -188,7 +237,14 @@ impl ActDispatcher {
         action_id: String,
         action: GenesisAction,
     ) -> bool {
-        let pending_action = action.clone();
+        let pending_action_with_status = PendingAction {
+            action_id: action_id.clone(),
+            queued_tick_id: tick_id,
+            source_tick_id,
+            dispatched_at_ms: now_ms(),
+            delivery_status: Arc::new(AtomicU8::new(DeliveryStatus::Queued.as_u8())),
+            action: action.clone(),
+        };
         let command = ActionCommand {
             action_id: action_id.clone(),
             tick_id,
@@ -196,25 +252,24 @@ impl ActDispatcher {
             action,
         };
 
+        let mut pending = self
+            .pending_actions
+            .lock()
+            .expect("pending action ledger poisoned");
+        pending.push_back(pending_action_with_status);
+
         match self.sender.try_send(command) {
             Ok(()) => {
-                let pending_action_with_status = PendingAction {
-                    action_id: action_id.clone(),
-                    queued_tick_id: tick_id,
-                    source_tick_id,
-                    dispatched_at_ms: now_ms(),
-                    delivery_status: DeliveryStatus::Queued,
-                    action: pending_action,
-                };
-
-                self.pending_actions
-                    .lock()
-                    .expect("pending action ledger poisoned")
-                    .push_back(pending_action_with_status);
-
+                drop(pending);
                 // 记录 ActionQueued，而非模糊的 ActionDispatched。
                 // "Queued" = 已成功入队；后续 verify_pending_outcomes 确认 delivery。
                 self.auditor.log(AuditEvent::ActionQueued {
+                    tick_id,
+                    source_tick_id,
+                    action_id: action_id.clone(),
+                });
+                #[allow(deprecated)]
+                self.auditor.log(AuditEvent::ActionDispatched {
                     tick_id,
                     source_tick_id,
                     action_id,
@@ -222,6 +277,8 @@ impl ActDispatcher {
                 true
             }
             Err(TrySendError::Full(command)) => {
+                remove_latest_pending_action(&mut pending, &command.action_id);
+                drop(pending);
                 println!(
                     "[Act Dispatcher] ⚠️ 执行器繁忙，丢弃动作 {}: {:?}",
                     command.action_id, command.action
@@ -234,6 +291,8 @@ impl ActDispatcher {
                 false
             }
             Err(TrySendError::Disconnected(command)) => {
+                remove_latest_pending_action(&mut pending, &command.action_id);
+                drop(pending);
                 println!(
                     "[Act Dispatcher] 🚨 执行器离线，丢弃动作 {}: {:?}",
                     command.action_id, command.action
@@ -257,7 +316,7 @@ impl ActDispatcher {
         let mut retained = VecDeque::new();
 
         while let Some(action) = pending.pop_front() {
-            if action.queued_tick_id < current_tick_id {
+            if action.queued_tick_id < current_tick_id && action.is_delivery_terminal() {
                 ready.push(action);
             } else {
                 retained.push_back(action);
@@ -269,31 +328,38 @@ impl ActDispatcher {
     }
 }
 
-/// 外部 Actuator 执行结果，区分真实发送成功与本地 fallback。
-enum ActuatorDeliveryResult {
-    /// 消息已发送到 UnixSocket（可能是新连接）
-    Sent,
-    /// Socket 不可用：尝试了连接但仍失败
-    LocalFallback(()),
+fn remove_latest_pending_action(pending: &mut VecDeque<PendingAction>, action_id: &str) {
+    if let Some(index) = pending
+        .iter()
+        .rposition(|action| action.action_id == action_id)
+    {
+        pending.remove(index);
+    }
 }
 
-fn execute_action(command: ActionCommand, auditor: &AuditLogger) {
+fn execute_action(command: ActionCommand, auditor: &AuditLogger) -> DeliveryStatus {
     // 先执行外部 Actuator，结果绑定到 delivery_result
     let delivery_result = match send_to_external_actuator(&command.action_id, &command.action) {
-        Ok(()) => ActuatorDeliveryResult::Sent,
+        Ok(()) => DeliveryStatus::Sent,
         Err(err) => {
-            println!("[Actuator] ⚠️ local actuator unavailable ({}): {}", command.action_id, err);
+            println!(
+                "[Actuator] ⚠️ local actuator unavailable ({}): {}",
+                command.action_id, err
+            );
             auditor.log(AuditEvent::FailureObserved {
                 tick_id: command.tick_id,
                 component: "Actuator".to_string(),
-                error: format!("send_to_external_actuator failed for {}: {}", command.action_id, err),
+                error: format!(
+                    "send_to_external_actuator failed for {}: {}",
+                    command.action_id, err
+                ),
             });
-            ActuatorDeliveryResult::LocalFallback(())
+            DeliveryStatus::Fallback
         }
     };
 
     // match 块现在使用 delivery_result，区分成功和失败
-    let result_suffix = if matches!(delivery_result, ActuatorDeliveryResult::Sent) {
+    let result_suffix = if matches!(delivery_result, DeliveryStatus::Sent) {
         " → sent"
     } else {
         " → fallback (local)"
@@ -363,6 +429,8 @@ fn execute_action(command: ActionCommand, auditor: &AuditLogger) {
             );
         }
     }
+
+    delivery_result
 }
 
 fn send_to_external_actuator(action_id: &str, action: &GenesisAction) -> Result<(), String> {
@@ -372,7 +440,10 @@ fn send_to_external_actuator(action_id: &str, action: &GenesisAction) -> Result<
             .unwrap_or_else(|_| DEFAULT_DYNAMIC_ACTUATOR_SOCKET_PATH.to_string()),
         _ => ACTUATOR_SOCKET_PATH.to_string(),
     };
-    let mut stream = UnixStream::connect(&socket_path).map_err(|err| err.to_string())?;
+    let mut stream = connect_unix_stream_with_timeout(&socket_path, ACTUATOR_CONNECT_TIMEOUT)?;
+    stream
+        .set_write_timeout(Some(ACTUATOR_WRITE_TIMEOUT))
+        .map_err(|err| err.to_string())?;
     let mut frame = if matches!(action, GenesisAction::ClickPoint { .. }) {
         let mut value = serde_json::to_value(action).map_err(|err| err.to_string())?;
         let Some(object) = value.as_object_mut() else {
@@ -390,9 +461,20 @@ fn send_to_external_actuator(action_id: &str, action: &GenesisAction) -> Result<
     stream.write_all(&frame).map_err(|err| err.to_string())
 }
 
+fn connect_unix_stream_with_timeout(path: &str, timeout: Duration) -> Result<UnixStream, String> {
+    let socket = Socket::new(Domain::UNIX, Type::STREAM, None).map_err(|err| err.to_string())?;
+    let address = SockAddr::unix(path).map_err(|err| err.to_string())?;
+    socket
+        .connect_timeout(&address, timeout)
+        .map_err(|err| err.to_string())?;
+    let fd = socket.into_raw_fd();
+    Ok(unsafe { UnixStream::from_raw_fd(fd) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::AuditLogger;
 
     #[test]
     fn wait_accepts_next_tick_condition_within_budget() {
@@ -440,5 +522,26 @@ mod tests {
             reason: "bad".to_string(),
         };
         assert!(action.validate_for_dispatch().is_err());
+    }
+
+    #[test]
+    fn verifier_retains_actions_until_delivery_reaches_terminal_state() {
+        let dispatcher = ActDispatcher::new(1, AuditLogger::new(16));
+        {
+            let mut pending = dispatcher.pending_actions.lock().unwrap();
+            pending.push_back(PendingAction {
+                action_id: "act-test-queued".to_string(),
+                queued_tick_id: 1,
+                source_tick_id: 1,
+                dispatched_at_ms: 1,
+                delivery_status: Arc::new(AtomicU8::new(DeliveryStatus::Queued.as_u8())),
+                action: GenesisAction::Noop {
+                    reason: Some("not delivered yet".to_string()),
+                },
+            });
+        }
+
+        assert!(dispatcher.take_pending_for_verification(2).is_empty());
+        assert_eq!(dispatcher.pending_actions.lock().unwrap().len(), 1);
     }
 }

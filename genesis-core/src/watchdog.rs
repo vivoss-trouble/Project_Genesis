@@ -3,7 +3,7 @@ use genesis_contracts::wire::{
     GenesisPayload, GenesisPluginApi, GenesisResponse, GenesisSlice,
 };
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 struct WorkerRequest {
@@ -17,6 +17,7 @@ pub struct PluginWorker {
     sender: Option<SyncSender<WorkerRequest>>,
     receiver: Option<Receiver<GenesisResponse>>,
     api: GenesisPluginApi,
+    handle: Option<JoinHandle<()>>,
     pub is_tainted: bool,
 }
 
@@ -26,7 +27,7 @@ impl PluginWorker {
         let (tx_out, rx_out) = sync_channel::<GenesisResponse>(1);
         let api_clone = api;
 
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             while let Ok(request) = rx_in.recv() {
                 let payload = GenesisPayload {
                     abi_version: GENESIS_ABI_VERSION,
@@ -42,32 +43,25 @@ impl PluginWorker {
                 }));
 
                 match result {
-                    Ok(response) => {
-                        match tx_out.try_send(response) {
-                            Ok(()) => {}
-                            Err(std::sync::mpsc::TrySendError::Full(resp)) => {
-                                eprintln!("[Watchdog] recv_timeout lost, freeing response buffer");
-                                (api_clone.free_response)(resp);
-                            }
-                            Err(_) => {
-                                // 通道关闭，无法发送也无法释放。
-                                // 由于响应已在错误路径中（Full），不会泄漏。
-                            }
+                    Ok(response) => match tx_out.try_send(response) {
+                        Ok(()) => {}
+                        Err(std::sync::mpsc::TrySendError::Full(resp))
+                        | Err(std::sync::mpsc::TrySendError::Disconnected(resp)) => {
+                            eprintln!("[Watchdog] recv_timeout lost, freeing response buffer");
+                            (api_clone.free_response)(resp);
                         }
-                    }
+                    },
                     Err(panic_payload) => {
                         eprintln!("[Watchdog] Plugin panic captured: {:?}", panic_payload);
                         // 构造 fallback response 并尝试发送
-                        let err_resp = GenesisResponse::empty(
-                            GENESIS_STATUS_ERROR,
-                            GENESIS_ERROR_NONE,
-                        );
+                        let err_resp =
+                            GenesisResponse::empty(GENESIS_STATUS_ERROR, GENESIS_ERROR_NONE);
                         match tx_out.try_send(err_resp) {
                             Ok(()) => {}
-                            Err(std::sync::mpsc::TrySendError::Full(resp)) => {
+                            Err(std::sync::mpsc::TrySendError::Full(resp))
+                            | Err(std::sync::mpsc::TrySendError::Disconnected(resp)) => {
                                 (api_clone.free_response)(resp);
                             }
-                            Err(_) => {}
                         }
                     }
                 }
@@ -78,6 +72,7 @@ impl PluginWorker {
             sender: Some(tx_in),
             receiver: Some(rx_out),
             api,
+            handle: Some(handle),
             is_tainted: false,
         }
     }
@@ -137,6 +132,19 @@ impl PluginWorker {
 
     pub fn retire(&mut self) {
         self.taint();
+    }
+
+    pub fn try_reap(&mut self) -> bool {
+        let Some(handle) = self.handle.as_ref() else {
+            return true;
+        };
+        if !handle.is_finished() {
+            return false;
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        true
     }
 
     fn taint(&mut self) {

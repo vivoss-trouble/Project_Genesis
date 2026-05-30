@@ -1,0 +1,11 @@
+[package]
+name = "lazarus-cutover-gate"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lazarus-contracts = { path = "../lazarus-contracts" }
+lazarus-converter-pipeline = { path = "../lazarus-converter-pipeline" }
+lazarus-orchestrator = { path = "../lazarus-orchestrator" }
+serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
