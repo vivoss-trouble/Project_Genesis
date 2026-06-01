@@ -177,6 +177,7 @@ def metadata(root):
 files = {
     "autonomous_summary": summary_path,
     "platform_contracts": evidence_dir / "platform-contracts.json",
+    "real_platform_matrix": evidence_dir / "real-platform-matrix.json",
     "validation": evidence_dir / validation_file,
     "release_precheck": evidence_dir / "release-precheck.json",
 }
@@ -187,6 +188,8 @@ if status == "blocked" and reason == "git_clean_precheck":
     primary = "release_precheck"
 elif status == "failed" and current_step == "platform_contracts":
     primary = "platform_contracts"
+elif status == "failed" and current_step == "real_platform_matrix":
+    primary = "real_platform_matrix"
 elif status == "failed" and current_step == "validation":
     primary = "validation"
 elif status == "failed":
@@ -570,6 +573,63 @@ def check_validation_evidence(evidence):
                 )
                 sys.exit(1)
 
+def check_real_platform_matrix(evidence):
+    expected_platforms = {"macos", "linux", "windows", "ios", "android"}
+    actual_platforms = set(evidence.get("required_platforms", []))
+    if expected_platforms != actual_platforms:
+        print(
+            "[autonomous_blueprint] real platform matrix required platform mismatch: "
+            f"expected={sorted(expected_platforms)} actual={sorted(actual_platforms)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    platforms = evidence.get("platforms")
+    if not isinstance(platforms, dict):
+        print("[autonomous_blueprint] real platform matrix missing platforms object", file=sys.stderr)
+        sys.exit(1)
+    for platform in expected_platforms:
+        entry = platforms.get(platform)
+        if not isinstance(entry, dict):
+            print(f"[autonomous_blueprint] real platform matrix missing platform entry: {platform}", file=sys.stderr)
+            sys.exit(1)
+        verification = entry.get("verification")
+        if verification == "verified":
+            if not entry.get("manifest_exists"):
+                print(f"[autonomous_blueprint] platform verified without manifest: {platform}", file=sys.stderr)
+                sys.exit(1)
+            if entry.get("status") != "passed":
+                print(
+                    f"[autonomous_blueprint] verified platform manifest did not pass: {platform} status={entry.get('status')}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if entry.get("git_head") != summary.get("git_head"):
+                print(f"[autonomous_blueprint] verified platform git_head mismatch: {platform}", file=sys.stderr)
+                sys.exit(1)
+            if entry.get("real_host_smoke") is not True:
+                print(f"[autonomous_blueprint] verified platform is not real_host_smoke: {platform}", file=sys.stderr)
+                sys.exit(1)
+        elif verification not in {"missing", "invalid"}:
+            print(
+                f"[autonomous_blueprint] platform verification value is invalid: {platform}={verification}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    if evidence.get("claim") == "verified":
+        if evidence.get("status") != "passed" or evidence.get("full_matrix_verified") is not True:
+            print(
+                "[autonomous_blueprint] real platform matrix claimed verified without full pass",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    else:
+        if evidence.get("status") == "passed" or evidence.get("full_matrix_verified") is True:
+            print(
+                "[autonomous_blueprint] real platform matrix status contradicts unverified claim",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
 if expected_status == "passed":
     for name in ("platform_contracts", "validation"):
         evidence = check_metadata(name, load_evidence(name))
@@ -583,6 +643,14 @@ if expected_status == "passed":
             check_platform_contracts(evidence)
         if name == "validation":
             check_validation_evidence(evidence)
+    real_matrix = check_metadata("real_platform_matrix", load_evidence("real_platform_matrix"))
+    if real_matrix.get("status") not in {"passed", "partial"}:
+        print(
+            f"[autonomous_blueprint] real platform matrix status mismatch: actual={real_matrix.get('status')}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    check_real_platform_matrix(real_matrix)
     if summary.get("mode") == "auto":
         release_precheck = check_metadata("release_precheck", load_evidence("release_precheck"))
         if release_precheck.get("status") not in {"passed", "blocked"}:
@@ -654,6 +722,15 @@ elif expected_status == "failed":
         if not isinstance(evidence.get("target_matrix"), dict):
             print("[autonomous_blueprint] failed platform evidence missing target_matrix", file=sys.stderr)
             sys.exit(1)
+    elif primary == "real_platform_matrix":
+        evidence = check_metadata("real_platform_matrix", load_evidence("real_platform_matrix"))
+        if evidence.get("status") != "failed":
+            print(
+                f"[autonomous_blueprint] failed real platform matrix status mismatch: actual={evidence.get('status')}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        check_real_platform_matrix(evidence)
     elif primary == "validation":
         evidence = check_metadata("validation", load_evidence("validation"))
         if evidence.get("status") != "failed":
@@ -736,6 +813,15 @@ CURRENT_STEP="platform_contracts"
 echo "[autonomous_blueprint] platform contracts"
 GENESIS_PLATFORM_CONTRACT_EVIDENCE="$EVIDENCE_DIR/platform-contracts.json" \
   bash "$ROOT/scripts/validate_platform_contracts.sh"
+
+CURRENT_STEP="real_platform_matrix"
+echo "[autonomous_blueprint] real platform matrix"
+GENESIS_PLATFORM_SMOKE_DIR="$EVIDENCE_DIR/platform-smoke" \
+  bash "$ROOT/scripts/record_platform_smoke.sh"
+GENESIS_PLATFORM_SMOKE_DIR="$EVIDENCE_DIR/platform-smoke" \
+GENESIS_REAL_PLATFORM_MATRIX_EVIDENCE="$EVIDENCE_DIR/real-platform-matrix.json" \
+GENESIS_REQUIRE_REAL_PLATFORM_MATRIX="${GENESIS_REQUIRE_REAL_PLATFORM_MATRIX:-0}" \
+  bash "$ROOT/scripts/validate_real_platform_matrix.sh"
 
 CURRENT_STEP="core_shell_clippy"
 echo "[autonomous_blueprint] core shell clippy"
