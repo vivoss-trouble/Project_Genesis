@@ -154,14 +154,14 @@ impl PlatformError {
     }
 
     pub fn io(error: std::io::Error) -> Self {
-        if error.kind() == std::io::ErrorKind::WouldBlock {
-            return Self {
-                kind: PlatformErrorKind::WouldBlock,
-                message: error.to_string(),
-            };
-        }
+        let kind = match error.kind() {
+            std::io::ErrorKind::PermissionDenied => PlatformErrorKind::PermissionDenied,
+            std::io::ErrorKind::TimedOut => PlatformErrorKind::Timeout,
+            std::io::ErrorKind::WouldBlock => PlatformErrorKind::WouldBlock,
+            _ => PlatformErrorKind::Io,
+        };
         Self {
-            kind: PlatformErrorKind::Io,
+            kind,
             message: error.to_string(),
         }
     }

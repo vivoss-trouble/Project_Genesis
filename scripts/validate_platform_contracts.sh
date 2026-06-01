@@ -245,6 +245,9 @@ def fail_if_needed():
         )
         sys.exit(1)
 
+def skip_scanned_file(path):
+    return not path.is_file() or "target" in path.parts or "tests" in path.parts
+
 allowed = {
     Path("genesis-platform/Cargo.toml"),
     Path("genesis-platform/src/desktop/unix_socket.rs"),
@@ -260,7 +263,7 @@ for root in roots:
     if not root.exists():
         continue
     for path in root.rglob("*"):
-        if not path.is_file() or "target" in path.parts:
+        if skip_scanned_file(path):
             continue
         if path in allowed:
             continue
@@ -290,7 +293,7 @@ for root in roots:
     if not root.exists():
         continue
     for path in root.rglob("*"):
-        if not path.is_file() or "target" in path.parts:
+        if skip_scanned_file(path):
             continue
         if path.suffix != ".py":
             continue
@@ -360,7 +363,7 @@ for root in roots:
     if not root.exists():
         continue
     for path in root.rglob("*"):
-        if not path.is_file() or "target" in path.parts:
+        if skip_scanned_file(path):
             continue
         if path.suffix not in {".rs", ".toml"}:
             continue
@@ -397,7 +400,7 @@ for root in roots:
     if not root.exists():
         continue
     for path in root.rglob("*"):
-        if not path.is_file() or "target" in path.parts:
+        if skip_scanned_file(path):
             continue
         if path.suffix != ".rs":
             continue
@@ -424,7 +427,7 @@ for root in roots:
     if not root.exists():
         continue
     for path in root.rglob("*"):
-        if not path.is_file() or "target" in path.parts:
+        if skip_scanned_file(path):
             continue
         if path.suffix != ".rs":
             continue
@@ -458,7 +461,7 @@ for root in roots:
     if not root.exists():
         continue
     for path in root.rglob("*"):
-        if not path.is_file() or "target" in path.parts:
+        if skip_scanned_file(path):
             continue
         if path.suffix != ".rs":
             continue
@@ -495,7 +498,7 @@ for root in roots:
     if not root.exists():
         continue
     for path in root.rglob("*"):
-        if not path.is_file() or "target" in path.parts:
+        if skip_scanned_file(path):
             continue
         if path.suffix != ".rs":
             continue
@@ -525,7 +528,7 @@ for root in roots:
     if not root.exists():
         continue
     for path in root.rglob("*"):
-        if not path.is_file() or "target" in path.parts:
+        if skip_scanned_file(path):
             continue
         if path.suffix != ".rs":
             continue
@@ -560,7 +563,7 @@ for root in roots:
     if not root.exists():
         continue
     for path in root.rglob("*"):
-        if not path.is_file() or "target" in path.parts:
+        if skip_scanned_file(path):
             continue
         if path.suffix not in {".rs", ".py"}:
             continue

@@ -1,9 +1,136 @@
 use genesis_platform::{
     DirectoryKind, IpcEndpoint, Platform, PlatformAdapter, PlatformCapabilities, PlatformError,
-    RuntimeProfile, ipc::LocalServiceAddress,
+    PlatformErrorKind, RuntimeProfile, ipc::LocalServiceAddress,
 };
-use std::path::PathBuf;
+use std::fmt;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
+
+pub const GENESIS_SDK_SHELL_ABI_VERSION: u32 = 1;
+pub const GENESIS_SDK_SHELL_CONTRACT_EPOCH: &str = "genesis-sdk-shell-v1";
+pub const SDK_MAX_EVIDENCE_LIST_LIMIT: usize = 256;
+pub const SDK_MAX_EVIDENCE_PAGE_BYTES: usize = 64 * 1024;
+
+pub const SHELL_API_METHODS: &[ShellApiMethod] = &[
+    ShellApiMethod::Health,
+    ShellApiMethod::EvidenceRoot,
+    ShellApiMethod::ListEvidence,
+    ShellApiMethod::ReadEvidencePage,
+    ShellApiMethod::RunJob,
+    ShellApiMethod::JobStatus,
+    ShellApiMethod::LoadWasmArtifact,
+    ShellApiMethod::RequestLocalService,
+    ShellApiMethod::SendLocalService,
+    ShellApiMethod::RequestRemoteHttp,
+    ShellApiMethod::SendRemoteHttp,
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellApiMethod {
+    Health,
+    EvidenceRoot,
+    ListEvidence,
+    ReadEvidencePage,
+    RunJob,
+    JobStatus,
+    LoadWasmArtifact,
+    RequestLocalService,
+    SendLocalService,
+    RequestRemoteHttp,
+    SendRemoteHttp,
+}
+
+impl ShellApiMethod {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Health => "health",
+            Self::EvidenceRoot => "evidence_root",
+            Self::ListEvidence => "list_evidence",
+            Self::ReadEvidencePage => "read_evidence_page",
+            Self::RunJob => "run_job",
+            Self::JobStatus => "job_status",
+            Self::LoadWasmArtifact => "load_wasm_artifact",
+            Self::RequestLocalService => "request_local_service",
+            Self::SendLocalService => "send_local_service",
+            Self::RequestRemoteHttp => "request_remote_http",
+            Self::SendRemoteHttp => "send_remote_http",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SdkShellContract {
+    pub abi_version: u32,
+    pub epoch: &'static str,
+    pub methods: &'static [ShellApiMethod],
+}
+
+pub fn sdk_shell_contract() -> SdkShellContract {
+    SdkShellContract {
+        abi_version: GENESIS_SDK_SHELL_ABI_VERSION,
+        epoch: GENESIS_SDK_SHELL_CONTRACT_EPOCH,
+        methods: SHELL_API_METHODS,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SdkErrorKind {
+    Unsupported,
+    InvalidInput,
+    PermissionDenied,
+    Timeout,
+    WouldBlock,
+    Io,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SdkError {
+    pub kind: SdkErrorKind,
+    pub message: String,
+}
+
+impl SdkError {
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Self {
+            kind: SdkErrorKind::Unsupported,
+            message: message.into(),
+        }
+    }
+
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self {
+            kind: SdkErrorKind::InvalidInput,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<PlatformError> for SdkError {
+    fn from(error: PlatformError) -> Self {
+        let kind = match error.kind {
+            PlatformErrorKind::UnsupportedCapability => SdkErrorKind::Unsupported,
+            PlatformErrorKind::InvalidInput => SdkErrorKind::InvalidInput,
+            PlatformErrorKind::PermissionDenied => SdkErrorKind::PermissionDenied,
+            PlatformErrorKind::Timeout => SdkErrorKind::Timeout,
+            PlatformErrorKind::WouldBlock => SdkErrorKind::WouldBlock,
+            PlatformErrorKind::Io => SdkErrorKind::Io,
+            PlatformErrorKind::Unavailable => SdkErrorKind::Unavailable,
+        };
+        Self {
+            kind,
+            message: error.message,
+        }
+    }
+}
+
+impl fmt::Display for SdkError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{:?}: {}", self.kind, self.message)
+    }
+}
+
+impl std::error::Error for SdkError {}
 
 pub struct GenesisSdk<A: PlatformAdapter> {
     adapter: A,
@@ -40,11 +167,38 @@ pub struct EvidencePack {
     pub root: PathBuf,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvidenceListPage {
+    pub root: PathBuf,
+    pub offset: usize,
+    pub limit: usize,
+    pub entries: Vec<PathBuf>,
+    pub next_offset: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvidenceBytesPage {
+    pub relative_path: PathBuf,
+    pub offset: usize,
+    pub total_bytes: usize,
+    pub bytes: Vec<u8>,
+    pub next_offset: Option<usize>,
+}
+
 impl<A: PlatformAdapter> GenesisSdk<A> {
     pub fn new(adapter: A) -> Self {
         Self { adapter }
     }
 
+    pub fn shell_contract() -> SdkShellContract {
+        sdk_shell_contract()
+    }
+
+    pub fn contract(&self) -> SdkShellContract {
+        sdk_shell_contract()
+    }
+
+    /// Shell-facing API.
     pub fn health(&self) -> SdkHealth {
         SdkHealth {
             platform: self.adapter.platform(),
@@ -53,38 +207,136 @@ impl<A: PlatformAdapter> GenesisSdk<A> {
         }
     }
 
-    pub fn run_job(&self, _request: JobRequest) -> Result<JobId, PlatformError> {
-        Err(PlatformError::unsupported(
+    /// Shell-facing API.
+    pub fn run_job(&self, _request: JobRequest) -> Result<JobId, SdkError> {
+        Err(SdkError::from(PlatformError::unsupported(
             "GenesisSdk::run_job is not wired to genesis-core yet",
-        ))
+        )))
     }
 
-    pub fn job_status(&self, _job_id: &JobId) -> Result<JobStatus, PlatformError> {
-        Err(PlatformError::unsupported(
+    /// Shell-facing API.
+    pub fn job_status(&self, _job_id: &JobId) -> Result<JobStatus, SdkError> {
+        Err(SdkError::from(PlatformError::unsupported(
             "GenesisSdk::job_status is not wired to genesis-core yet",
-        ))
+        )))
     }
 
-    pub fn load_wasm_artifact(&self, bytes: &[u8]) -> Result<ArtifactId, PlatformError> {
+    /// Shell-facing API.
+    pub fn load_wasm_artifact(&self, bytes: &[u8]) -> Result<ArtifactId, SdkError> {
         if !self.adapter.capabilities().local_wasm {
-            return Err(PlatformError::unsupported(
+            return Err(SdkError::from(PlatformError::unsupported(
                 "local Wasm artifact execution is not available on this platform",
-            ));
+            )));
         }
         if bytes.is_empty() {
-            return Err(PlatformError::invalid("artifact bytes cannot be empty"));
+            return Err(SdkError::from(PlatformError::invalid(
+                "artifact bytes cannot be empty",
+            )));
         }
-        Err(PlatformError::unsupported(
+        Err(SdkError::from(PlatformError::unsupported(
             "GenesisSdk::load_wasm_artifact is not wired to genesis-core yet",
-        ))
+        )))
     }
 
-    pub fn evidence_root(&self) -> Result<EvidencePack, PlatformError> {
+    /// Shell-facing API.
+    pub fn evidence_root(&self) -> Result<EvidencePack, SdkError> {
         Ok(EvidencePack {
-            root: self.adapter.resolve_dir(DirectoryKind::Evidence)?,
+            root: self
+                .adapter
+                .resolve_dir(DirectoryKind::Evidence)
+                .map_err(SdkError::from)?,
         })
     }
 
+    /// Shell-facing API.
+    pub fn list_evidence(&self, offset: usize, limit: usize) -> Result<EvidenceListPage, SdkError> {
+        if limit == 0 {
+            return Err(SdkError::invalid("evidence list limit cannot be zero"));
+        }
+        if limit > SDK_MAX_EVIDENCE_LIST_LIMIT {
+            return Err(SdkError::invalid(format!(
+                "evidence list limit cannot exceed {SDK_MAX_EVIDENCE_LIST_LIMIT}"
+            )));
+        }
+
+        let root = self
+            .adapter
+            .resolve_dir(DirectoryKind::Evidence)
+            .map_err(SdkError::from)?;
+        let mut entries = self
+            .adapter
+            .read_dir_paths(&root)
+            .map_err(SdkError::from)?
+            .into_iter()
+            .map(|path| relative_evidence_path(&root, &path))
+            .collect::<Result<Vec<_>, _>>()?;
+        entries.sort();
+
+        let total = entries.len();
+        let page = entries
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+        let next_offset = offset
+            .checked_add(page.len())
+            .filter(|next_offset| *next_offset < total);
+
+        Ok(EvidenceListPage {
+            root,
+            offset,
+            limit,
+            entries: page,
+            next_offset,
+        })
+    }
+
+    /// Shell-facing API.
+    pub fn read_evidence_page(
+        &self,
+        relative_path: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<EvidenceBytesPage, SdkError> {
+        if limit == 0 {
+            return Err(SdkError::invalid("evidence page limit cannot be zero"));
+        }
+        if limit > SDK_MAX_EVIDENCE_PAGE_BYTES {
+            return Err(SdkError::invalid(format!(
+                "evidence page limit cannot exceed {SDK_MAX_EVIDENCE_PAGE_BYTES}"
+            )));
+        }
+
+        let root = self
+            .adapter
+            .resolve_dir(DirectoryKind::Evidence)
+            .map_err(SdkError::from)?;
+        let relative_path = validate_relative_evidence_path(relative_path)?;
+        let absolute_path = root.join(&relative_path);
+        let data = self
+            .adapter
+            .read_file(&absolute_path)
+            .map_err(SdkError::from)?;
+        let total_bytes = data.len();
+        let bytes = data
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+        let next_offset = offset
+            .checked_add(bytes.len())
+            .filter(|next_offset| *next_offset < total_bytes);
+
+        Ok(EvidenceBytesPage {
+            relative_path,
+            offset,
+            total_bytes,
+            bytes,
+            next_offset,
+        })
+    }
+
+    /// Internal adapter diagnostic; this is intentionally not part of the shell contract.
     pub fn local_service_address(
         &self,
         service_name: &str,
@@ -92,53 +344,106 @@ impl<A: PlatformAdapter> GenesisSdk<A> {
         self.adapter.local_service_address(service_name)
     }
 
+    /// Shell-facing API.
     pub fn request_local_service(
         &self,
         service_name: &str,
         payload: &[u8],
         timeout: Duration,
-    ) -> Result<Vec<u8>, PlatformError> {
-        let endpoint = IpcEndpoint::local_service(service_name)?;
-        let mut client = self.adapter.connect_ipc_with_timeout(endpoint, timeout)?;
-        client.request(payload, timeout)
+    ) -> Result<Vec<u8>, SdkError> {
+        let endpoint = IpcEndpoint::local_service(service_name).map_err(SdkError::from)?;
+        let mut client = self
+            .adapter
+            .connect_ipc_with_timeout(endpoint, timeout)
+            .map_err(SdkError::from)?;
+        client.request(payload, timeout).map_err(SdkError::from)
     }
 
+    /// Shell-facing API.
     pub fn request_remote_http(
         &self,
         base_url: &str,
         payload: &[u8],
         timeout: Duration,
-    ) -> Result<Vec<u8>, PlatformError> {
+    ) -> Result<Vec<u8>, SdkError> {
         let endpoint = IpcEndpoint::RemoteHttp {
             base_url: base_url.to_string(),
         };
-        let mut client = self.adapter.connect_ipc_with_timeout(endpoint, timeout)?;
-        client.request(payload, timeout)
+        let mut client = self
+            .adapter
+            .connect_ipc_with_timeout(endpoint, timeout)
+            .map_err(SdkError::from)?;
+        client.request(payload, timeout).map_err(SdkError::from)
     }
 
+    /// Shell-facing API.
     pub fn send_local_service(
         &self,
         service_name: &str,
         payload: &[u8],
         timeout: Duration,
-    ) -> Result<(), PlatformError> {
-        let endpoint = IpcEndpoint::local_service(service_name)?;
-        let mut client = self.adapter.connect_ipc_with_timeout(endpoint, timeout)?;
-        client.send(payload, timeout)
+    ) -> Result<(), SdkError> {
+        let endpoint = IpcEndpoint::local_service(service_name).map_err(SdkError::from)?;
+        let mut client = self
+            .adapter
+            .connect_ipc_with_timeout(endpoint, timeout)
+            .map_err(SdkError::from)?;
+        client.send(payload, timeout).map_err(SdkError::from)
     }
 
+    /// Shell-facing API.
     pub fn send_remote_http(
         &self,
         base_url: &str,
         payload: &[u8],
         timeout: Duration,
-    ) -> Result<(), PlatformError> {
+    ) -> Result<(), SdkError> {
         let endpoint = IpcEndpoint::RemoteHttp {
             base_url: base_url.to_string(),
         };
-        let mut client = self.adapter.connect_ipc_with_timeout(endpoint, timeout)?;
-        client.send(payload, timeout)
+        let mut client = self
+            .adapter
+            .connect_ipc_with_timeout(endpoint, timeout)
+            .map_err(SdkError::from)?;
+        client.send(payload, timeout).map_err(SdkError::from)
     }
+}
+
+fn relative_evidence_path(root: &Path, path: &Path) -> Result<PathBuf, SdkError> {
+    path.strip_prefix(root)
+        .map(|path| path.to_path_buf())
+        .map_err(|_| SdkError::invalid("evidence entry escaped evidence root"))
+}
+
+fn validate_relative_evidence_path(raw: &str) -> Result<PathBuf, SdkError> {
+    if raw.trim().is_empty() {
+        return Err(SdkError::invalid("evidence path cannot be empty"));
+    }
+
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return Err(SdkError::invalid("evidence path must be relative"));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(SdkError::invalid(
+                    "evidence path cannot contain traversal components",
+                ));
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(SdkError::invalid("evidence path cannot be empty"));
+    }
+    Ok(normalized)
 }
 
 #[cfg(test)]
