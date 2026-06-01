@@ -186,7 +186,7 @@ files = {
     "release_precheck": evidence_dir / "release-precheck.json",
 }
 external_evidence_path = evidence_dir / "external-evidence-collection.json"
-if os.environ.get("GENESIS_EXTERNAL_EVIDENCE_BUNDLE") or external_evidence_path.exists():
+if os.environ.get("GENESIS_EXTERNAL_EVIDENCE_BUNDLE"):
     files["external_evidence_collection"] = external_evidence_path
 if mode != "release" and requested_mode != "auto":
     files.pop("release_precheck")
@@ -970,6 +970,10 @@ if [[ "$MODE" == "release" ]]; then
     git status --short >&2
     exit 3
   fi
+fi
+
+if [[ -z "${GENESIS_EXTERNAL_EVIDENCE_BUNDLE:-}" ]]; then
+  rm -f "$EVIDENCE_DIR/external-evidence-collection.json"
 fi
 
 CURRENT_STEP="platform_contracts"
