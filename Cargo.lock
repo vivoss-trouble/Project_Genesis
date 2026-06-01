@@ -720,6 +720,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "genesis-mobile-control"
+version = "0.1.0"
+dependencies = [
+ "genesis-platform",
+ "genesis-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "genesis-os-driver"
 version = "0.1.0"
 dependencies = [

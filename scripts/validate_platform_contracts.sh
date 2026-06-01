@@ -17,6 +17,7 @@ PACKAGES=(
   genesis-platform
   genesis-sdk
   genesis-desktop-shell
+  genesis-mobile-control
   brain-llm
   genesis-replay
   genesis-os-driver
@@ -114,6 +115,7 @@ manifest = {
         "genesis-platform",
         "genesis-sdk",
         "genesis-desktop-shell",
+        "genesis-mobile-control",
         "brain-llm",
         "genesis-replay",
         "genesis-os-driver",
@@ -210,6 +212,7 @@ roots = [
     Path("genesis-core"),
     Path("genesis-sdk"),
     Path("genesis-desktop-shell"),
+    Path("genesis-mobile-control"),
     Path("genesis-platform"),
     Path("genesis-plugins"),
     Path("genesis-daemons"),
