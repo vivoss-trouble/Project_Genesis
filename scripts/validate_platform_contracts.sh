@@ -16,6 +16,7 @@ fi
 PACKAGES=(
   genesis-platform
   genesis-sdk
+  genesis-desktop-shell
   brain-llm
   genesis-replay
   genesis-os-driver
@@ -112,6 +113,7 @@ manifest = {
     "packages": [
         "genesis-platform",
         "genesis-sdk",
+        "genesis-desktop-shell",
         "brain-llm",
         "genesis-replay",
         "genesis-os-driver",
@@ -207,6 +209,7 @@ import sys
 roots = [
     Path("genesis-core"),
     Path("genesis-sdk"),
+    Path("genesis-desktop-shell"),
     Path("genesis-platform"),
     Path("genesis-plugins"),
     Path("genesis-daemons"),

@@ -5,6 +5,7 @@ members = [
     "genesis-contracts",
     "genesis-core",
     "genesis-cli",
+    "genesis-desktop-shell",
     "genesis-sdk",
     "genesis-replay",
     "lazarus-contracts",

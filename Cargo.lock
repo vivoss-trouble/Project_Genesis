@@ -701,6 +701,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "genesis-desktop-shell"
+version = "0.1.0"
+dependencies = [
+ "genesis-platform",
+ "genesis-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "genesis-frame-grabber"
 version = "0.1.0"
 dependencies = [
