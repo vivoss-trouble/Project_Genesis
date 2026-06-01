@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EVIDENCE_PATH="${GENESIS_RELEASE_PACKAGING_EVIDENCE:-$ROOT/.genesis-state/release-packaging.json}"
 PLATFORM_MATRIX_PATH="${GENESIS_RELEASE_PLATFORM_MATRIX_EVIDENCE:-$ROOT/.genesis-state/real-platform-matrix.json}"
 VALIDATION_EVIDENCE_PATH="${GENESIS_RELEASE_VALIDATION_EVIDENCE:-$ROOT/.genesis-state/validation-release.json}"
+SIGNING_DIR="${GENESIS_RELEASE_SIGNING_DIR:-$ROOT/.genesis-state/release-signing}"
 REQUIRE_FULL="${GENESIS_REQUIRE_RELEASE_PACKAGING:-0}"
 CURRENT_STEP="init"
 
@@ -14,7 +15,7 @@ write_packaging_manifest() {
   local status="$1"
   local reason="${2:-}"
   local exit_code="${3:-}"
-  python3 - "$EVIDENCE_PATH" "$ROOT" "$PLATFORM_MATRIX_PATH" "$VALIDATION_EVIDENCE_PATH" "$status" "$reason" "$exit_code" "$CURRENT_STEP" "$REQUIRE_FULL" <<'PY'
+  python3 - "$EVIDENCE_PATH" "$ROOT" "$PLATFORM_MATRIX_PATH" "$VALIDATION_EVIDENCE_PATH" "$SIGNING_DIR" "$status" "$reason" "$exit_code" "$CURRENT_STEP" "$REQUIRE_FULL" <<'PY'
 from pathlib import Path
 from datetime import datetime, timezone
 import glob
@@ -30,11 +31,12 @@ path = Path(sys.argv[1])
 root = Path(sys.argv[2])
 platform_matrix_path = Path(sys.argv[3])
 validation_path = Path(sys.argv[4])
-status = sys.argv[5]
-reason = sys.argv[6]
-exit_code = sys.argv[7]
-current_step = sys.argv[8]
-require_full = sys.argv[9] == "1"
+signing_dir = Path(sys.argv[5])
+status = sys.argv[6]
+reason = sys.argv[7]
+exit_code = sys.argv[8]
+current_step = sys.argv[9]
+require_full = sys.argv[10] == "1"
 
 def git(args):
     return subprocess.run(
@@ -59,6 +61,49 @@ def load_json(file_path):
         return None
     except json.JSONDecodeError as error:
         return {"status": "invalid", "json_error": str(error)}
+
+def signing_manifest(kind):
+    manifest_path = signing_dir / f"{kind}.json"
+    entry = {
+        "path": str(manifest_path),
+        "exists": manifest_path.exists(),
+        "verified": False,
+    }
+    manifest = load_json(manifest_path)
+    if not isinstance(manifest, dict):
+        entry["reason"] = "missing"
+        return entry
+    artifact = manifest.get("artifact")
+    verification = manifest.get("verification")
+    entry.update({
+        "schema_version": manifest.get("schema_version"),
+        "status": manifest.get("status"),
+        "kind": manifest.get("kind"),
+        "git_head": manifest.get("git_head"),
+        "git_dirty": manifest.get("git_dirty"),
+        "real_signing_evidence": manifest.get("real_signing_evidence"),
+        "artifact_sha256": artifact.get("sha256") if isinstance(artifact, dict) else None,
+        "verification_exit_code": verification.get("exit_code") if isinstance(verification, dict) else None,
+        "sha256": sha256_file(manifest_path) if manifest_path.exists() else None,
+    })
+    if manifest.get("schema_version") != 1:
+        entry["reason"] = "schema_version_mismatch"
+    elif manifest.get("kind") != kind:
+        entry["reason"] = "kind_mismatch"
+    elif manifest.get("status") != "passed":
+        entry["reason"] = "status_not_passed"
+    elif manifest.get("git_head") != git_head:
+        entry["reason"] = "git_head_mismatch"
+    elif manifest.get("real_signing_evidence") is not True:
+        entry["reason"] = "not_real_signing_evidence"
+    elif not entry.get("artifact_sha256"):
+        entry["reason"] = "missing_artifact_hash"
+    elif entry.get("verification_exit_code") != 0:
+        entry["reason"] = "verification_failed"
+    else:
+        entry["verified"] = True
+        entry["reason"] = "verified"
+    return entry
 
 def cargo_package_version(package_name):
     cargo_toml = root / package_name / "Cargo.toml"
@@ -99,6 +144,16 @@ dirty_paths = git(["status", "--short"]).splitlines()
 platform_matrix = load_json(platform_matrix_path)
 validation = load_json(validation_path)
 sdk_contract = sdk_contract_constants()
+signing_evidence = {
+    kind: signing_manifest(kind)
+    for kind in (
+        "desktop_installer",
+        "desktop_signing",
+        "desktop_notarization",
+        "ios_development_signing",
+        "android_development_signing",
+    )
+}
 
 desktop_binary = root / "target" / "release" / ("genesis-desktop-shell.exe" if os.name == "nt" else "genesis-desktop-shell")
 artifacts = []
@@ -144,11 +199,11 @@ requirements = {
     "platform_manifest_link": "passed" if platform_manifest.get("exists") and platform_manifest.get("git_head") == git_head else "missing",
     "validation_profile_link": "passed" if validation_profile.get("exists") and validation_profile.get("status") == "passed" and validation_profile.get("git_head") == git_head else "missing",
     "desktop_package_smoke": "passed" if desktop_binary.exists() else "missing",
-    "desktop_installer": "missing",
-    "desktop_signing": "missing",
-    "desktop_notarization": "missing",
-    "ios_development_signing": "missing",
-    "android_development_signing": "missing",
+    "desktop_installer": "passed" if signing_evidence["desktop_installer"]["verified"] else "missing",
+    "desktop_signing": "passed" if signing_evidence["desktop_signing"]["verified"] else "missing",
+    "desktop_notarization": "passed" if signing_evidence["desktop_notarization"]["verified"] else "missing",
+    "ios_development_signing": "passed" if signing_evidence["ios_development_signing"]["verified"] else "missing",
+    "android_development_signing": "passed" if signing_evidence["android_development_signing"]["verified"] else "missing",
     "mobile_network_permission_documentation": "passed" if (root / "docs" / "mobile-release-behavior-phase5.md").exists() else "missing",
     "mobile_background_behavior_documentation": "passed" if (root / "docs" / "mobile-release-behavior-phase5.md").exists() else "missing",
 }
@@ -191,6 +246,7 @@ manifest = {
     "artifacts": artifacts,
     "platform_manifest": platform_manifest,
     "validation_profile": validation_profile,
+    "signing_evidence": signing_evidence,
     "requirements": requirements,
     "hard_links_passed": hard_links_passed,
     "release_complete": release_complete,

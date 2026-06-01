@@ -731,6 +731,32 @@ def check_release_packaging(evidence):
     if evidence.get("hard_links_passed") is not True:
         print("[autonomous_blueprint] release packaging hard links did not pass", file=sys.stderr)
         sys.exit(1)
+    signing_evidence = evidence.get("signing_evidence")
+    if not isinstance(signing_evidence, dict):
+        print("[autonomous_blueprint] release packaging evidence missing signing evidence map", file=sys.stderr)
+        sys.exit(1)
+    for signing_requirement in (
+        "desktop_installer",
+        "desktop_signing",
+        "desktop_notarization",
+        "ios_development_signing",
+        "android_development_signing",
+    ):
+        signing_entry = signing_evidence.get(signing_requirement)
+        if not isinstance(signing_entry, dict):
+            print(
+                f"[autonomous_blueprint] release packaging missing signing entry: {signing_requirement}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if requirements.get(signing_requirement) == "passed":
+            if signing_entry.get("verified") is not True or signing_entry.get("git_head") != summary.get("git_head"):
+                print(
+                    "[autonomous_blueprint] release packaging signing requirement passed without verified evidence: "
+                    f"{signing_requirement}={signing_entry}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
     if evidence.get("release_complete") is True and evidence.get("status") != "passed":
         print("[autonomous_blueprint] release packaging complete evidence must have status=passed", file=sys.stderr)
         sys.exit(1)
@@ -995,6 +1021,7 @@ echo "[autonomous_blueprint] release packaging evidence"
 GENESIS_RELEASE_PACKAGING_EVIDENCE="$EVIDENCE_DIR/release-packaging.json" \
 GENESIS_RELEASE_PLATFORM_MATRIX_EVIDENCE="$EVIDENCE_DIR/real-platform-matrix.json" \
 GENESIS_RELEASE_VALIDATION_EVIDENCE="$EVIDENCE_DIR/$VALIDATION_EVIDENCE_FILE" \
+GENESIS_RELEASE_SIGNING_DIR="${GENESIS_RELEASE_SIGNING_DIR:-$EVIDENCE_DIR/release-signing}" \
 GENESIS_REQUIRE_RELEASE_PACKAGING="${GENESIS_REQUIRE_RELEASE_PACKAGING:-0}" \
   bash "$ROOT/scripts/record_release_packaging_evidence.sh"
 

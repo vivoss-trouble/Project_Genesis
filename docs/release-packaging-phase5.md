@@ -20,6 +20,10 @@ It can become `passed` only when every release packaging requirement is present.
 - `scripts/record_release_packaging_evidence.sh` builds the release desktop shell
   and SDK/mobile-control libraries, runs a desktop shell package smoke, hashes
   artifacts, and writes `.genesis-state/release-packaging.json`.
+- `scripts/record_release_signing_evidence.sh` is the portable CI/runner entry
+  for installer, signing, notarization, iOS signing, and Android signing
+  evidence. It records only evidence backed by a real artifact and a successful
+  verification command.
 - `scripts/run_autonomous_blueprint.sh` runs the packaging evidence step after
   validation and validates the manifest from `autonomous-summary.json`.
 

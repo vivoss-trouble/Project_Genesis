@@ -30,6 +30,9 @@ verified.
   `.genesis-state/platform-smoke/<platform>.json`.
 - `scripts/validate_real_platform_matrix.sh` aggregates platform smoke
   manifests into `.genesis-state/real-platform-matrix.json`.
+- `scripts/import_platform_smoke_manifest.sh` validates and imports a smoke
+  manifest produced by another real host or device into the matrix smoke
+  directory.
 - `scripts/run_autonomous_blueprint.sh` runs both scripts and links the matrix
   manifest from `autonomous-summary.json`.
 
