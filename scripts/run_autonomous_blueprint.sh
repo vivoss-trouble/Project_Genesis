@@ -178,6 +178,7 @@ files = {
     "autonomous_summary": summary_path,
     "platform_contracts": evidence_dir / "platform-contracts.json",
     "real_platform_matrix": evidence_dir / "real-platform-matrix.json",
+    "release_packaging": evidence_dir / "release-packaging.json",
     "validation": evidence_dir / validation_file,
     "release_precheck": evidence_dir / "release-precheck.json",
 }
@@ -190,6 +191,8 @@ elif status == "failed" and current_step == "platform_contracts":
     primary = "platform_contracts"
 elif status == "failed" and current_step == "real_platform_matrix":
     primary = "real_platform_matrix"
+elif status == "failed" and current_step == "release_packaging":
+    primary = "release_packaging"
 elif status == "failed" and current_step == "validation":
     primary = "validation"
 elif status == "failed":
@@ -630,6 +633,108 @@ def check_real_platform_matrix(evidence):
             )
             sys.exit(1)
 
+def check_release_packaging(evidence):
+    if evidence.get("status") not in {"passed", "partial"}:
+        print(
+            f"[autonomous_blueprint] release packaging status mismatch: actual={evidence.get('status')}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    sdk = evidence.get("sdk")
+    if not isinstance(sdk, dict) or sdk.get("package") != "genesis-sdk" or not sdk.get("version"):
+        print("[autonomous_blueprint] release packaging evidence missing SDK version", file=sys.stderr)
+        sys.exit(1)
+    if sdk.get("shell_contract_epoch") != "genesis-sdk-shell-v1" or sdk.get("shell_abi_version") != 1:
+        print("[autonomous_blueprint] release packaging SDK contract mismatch", file=sys.stderr)
+        sys.exit(1)
+    artifacts = evidence.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        print("[autonomous_blueprint] release packaging evidence missing artifact hashes", file=sys.stderr)
+        sys.exit(1)
+    artifact_kinds = {artifact.get("kind") for artifact in artifacts if isinstance(artifact, dict)}
+    if "desktop_shell_binary" not in artifact_kinds:
+        print("[autonomous_blueprint] release packaging evidence missing desktop shell binary artifact", file=sys.stderr)
+        sys.exit(1)
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            print("[autonomous_blueprint] release packaging artifact entry must be an object", file=sys.stderr)
+            sys.exit(1)
+        if not artifact.get("path") or not artifact.get("sha256") or len(artifact.get("sha256", "")) != 64:
+            print(
+                f"[autonomous_blueprint] release packaging artifact hash is invalid: {artifact}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not isinstance(artifact.get("bytes"), int) or artifact.get("bytes") <= 0:
+            print(
+                f"[autonomous_blueprint] release packaging artifact size is invalid: {artifact}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    platform_manifest = evidence.get("platform_manifest")
+    if not isinstance(platform_manifest, dict):
+        print("[autonomous_blueprint] release packaging evidence missing platform manifest link", file=sys.stderr)
+        sys.exit(1)
+    if platform_manifest.get("git_head") != summary.get("git_head"):
+        print("[autonomous_blueprint] release packaging platform manifest git_head mismatch", file=sys.stderr)
+        sys.exit(1)
+    if platform_manifest.get("status") not in {"passed", "partial"} or platform_manifest.get("claim") not in {"verified", "unverified"}:
+        print(
+            "[autonomous_blueprint] release packaging platform manifest status is invalid: "
+            f"{platform_manifest}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    validation_profile = evidence.get("validation_profile")
+    if not isinstance(validation_profile, dict):
+        print("[autonomous_blueprint] release packaging evidence missing validation profile link", file=sys.stderr)
+        sys.exit(1)
+    if validation_profile.get("git_head") != summary.get("git_head") or validation_profile.get("status") != "passed":
+        print(
+            "[autonomous_blueprint] release packaging validation profile link mismatch: "
+            f"{validation_profile}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    expected_profile = {
+        "fast": "default",
+        "pilot": "pilot",
+        "release": "release",
+    }.get(summary.get("effective_mode"))
+    if validation_profile.get("profile") != expected_profile:
+        print(
+            "[autonomous_blueprint] release packaging validation profile mismatch: "
+            f"expected={expected_profile} actual={validation_profile.get('profile')}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    requirements = evidence.get("requirements")
+    if not isinstance(requirements, dict):
+        print("[autonomous_blueprint] release packaging evidence missing requirements", file=sys.stderr)
+        sys.exit(1)
+    for requirement in (
+        "artifact_hashes",
+        "sdk_version",
+        "sdk_contract_constants",
+        "platform_manifest_link",
+        "validation_profile_link",
+        "desktop_package_smoke",
+        "mobile_network_permission_documentation",
+        "mobile_background_behavior_documentation",
+    ):
+        if requirements.get(requirement) != "passed":
+            print(
+                f"[autonomous_blueprint] release packaging hard requirement did not pass: {requirement}={requirements.get(requirement)}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    if evidence.get("hard_links_passed") is not True:
+        print("[autonomous_blueprint] release packaging hard links did not pass", file=sys.stderr)
+        sys.exit(1)
+    if evidence.get("release_complete") is True and evidence.get("status") != "passed":
+        print("[autonomous_blueprint] release packaging complete evidence must have status=passed", file=sys.stderr)
+        sys.exit(1)
+
 if expected_status == "passed":
     for name in ("platform_contracts", "validation"):
         evidence = check_metadata(name, load_evidence(name))
@@ -651,6 +756,8 @@ if expected_status == "passed":
         )
         sys.exit(1)
     check_real_platform_matrix(real_matrix)
+    release_packaging = check_metadata("release_packaging", load_evidence("release_packaging"))
+    check_release_packaging(release_packaging)
     if summary.get("mode") == "auto":
         release_precheck = check_metadata("release_precheck", load_evidence("release_precheck"))
         if release_precheck.get("status") not in {"passed", "blocked"}:
@@ -731,6 +838,17 @@ elif expected_status == "failed":
             )
             sys.exit(1)
         check_real_platform_matrix(evidence)
+    elif primary == "release_packaging":
+        evidence = check_metadata("release_packaging", load_evidence("release_packaging"))
+        if evidence.get("status") != "failed":
+            print(
+                f"[autonomous_blueprint] failed release packaging status mismatch: actual={evidence.get('status')}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not evidence.get("current_step") or not evidence.get("exit_code"):
+            print("[autonomous_blueprint] failed release packaging evidence missing current_step or exit_code", file=sys.stderr)
+            sys.exit(1)
     elif primary == "validation":
         evidence = check_metadata("validation", load_evidence("validation"))
         if evidence.get("status") != "failed":
@@ -859,6 +977,26 @@ case "$MODE" in
       bash "$ROOT/scripts/validate_all.sh"
     ;;
 esac
+
+case "$MODE" in
+  fast)
+    VALIDATION_EVIDENCE_FILE="validation-fast.json"
+    ;;
+  pilot)
+    VALIDATION_EVIDENCE_FILE="validation-pilot.json"
+    ;;
+  release)
+    VALIDATION_EVIDENCE_FILE="validation-release.json"
+    ;;
+esac
+
+CURRENT_STEP="release_packaging"
+echo "[autonomous_blueprint] release packaging evidence"
+GENESIS_RELEASE_PACKAGING_EVIDENCE="$EVIDENCE_DIR/release-packaging.json" \
+GENESIS_RELEASE_PLATFORM_MATRIX_EVIDENCE="$EVIDENCE_DIR/real-platform-matrix.json" \
+GENESIS_RELEASE_VALIDATION_EVIDENCE="$EVIDENCE_DIR/$VALIDATION_EVIDENCE_FILE" \
+GENESIS_REQUIRE_RELEASE_PACKAGING="${GENESIS_REQUIRE_RELEASE_PACKAGING:-0}" \
+  bash "$ROOT/scripts/record_release_packaging_evidence.sh"
 
 CURRENT_STEP="diff_whitespace"
 echo "[autonomous_blueprint] diff whitespace"
