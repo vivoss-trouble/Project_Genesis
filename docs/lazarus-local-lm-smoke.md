@@ -10,6 +10,12 @@ http://127.0.0.1:1234/v1/chat/completions
 
 The local path does not require an API key.
 
+The repository default is locked in `config/reasoning-engine.env`:
+
+```text
+LAZARUS_LM_MODEL=huihui-ai/qwen/claude-4.7-opus-q8_0.gguf
+```
+
 ## Required LM Studio State
 
 Before running the smoke:
@@ -27,7 +33,6 @@ If LM Studio refuses to load a model because of memory guardrails, choose a smal
 ## Run
 
 ```sh
-LAZARUS_LM_MODEL="<model-id>" \
 scripts/run_lazarus_local_lm_synthesis_smoke.sh
 ```
 
@@ -64,13 +69,12 @@ The endpoint `127.0.0.1:1234` was reachable during local validation.
 Observed model behavior:
 
 - Some large local Qwen models were rejected by LM Studio memory guardrails.
-- `huihui-ai/qwen/claude-4.7-opus--q8_0.gguf` completed the smoke path once through the OpenAI-compatible chat endpoint.
+- `huihui-ai/qwen/claude-4.7-opus-q8_0.gguf` is the locked local reasoning model for release smoke.
 - The successful run reached `SmokeTestPassed` in one synthesis iteration and produced a Wasm artifact plus `synthesis-smoke-report.json`.
 
 This observation is a local smoke result, not a release gate by itself. To make it a gate, run:
 
 ```sh
 RUN_LOCAL_LM_SMOKE=1 \
-LAZARUS_LM_MODEL='huihui-ai/qwen/claude-4.7-opus--q8_0.gguf' \
 bash scripts/validate_all.sh
 ```

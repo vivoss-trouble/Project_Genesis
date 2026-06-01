@@ -2,6 +2,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [ -f "$ROOT/config/reasoning-engine.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$ROOT/config/reasoning-engine.env"
+  set +a
+fi
+
 PROFILE="${GENESIS_VALIDATE_PROFILE:-default}"
 EVIDENCE_PATH="${GENESIS_VALIDATE_EVIDENCE:-$ROOT/.genesis-state/validation-evidence-${PROFILE}.json}"
 CURRENT_STEP="init"

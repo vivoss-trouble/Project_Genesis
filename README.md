@@ -4,14 +4,17 @@
 
 本地 OpenAI-compatible 模型测试说明：
 
+- `docs/reasoning-engine.md`
 - `docs/lazarus-local-lm-smoke.md`
 - `docs/lazarus-validation-gates.md`
 
 快速执行：
 
 ```sh
-LAZARUS_LM_MODEL="<model-id>" scripts/run_lazarus_local_lm_synthesis_smoke.sh
+scripts/run_lazarus_local_lm_synthesis_smoke.sh
 ```
+
+默认推理引擎配置固定在 `config/reasoning-engine.env`；需要临时切换模型时再显式覆盖 `LAZARUS_LM_MODEL`。
 
 验证门禁：
 

@@ -2,6 +2,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [ -f "$ROOT/config/reasoning-engine.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$ROOT/config/reasoning-engine.env"
+  set +a
+fi
+
 ENDPOINT="${LAZARUS_LM_ENDPOINT:-http://127.0.0.1:1234/v1/chat/completions}"
 MODELS_ENDPOINT="${ENDPOINT%/chat/completions}/models"
 SNAPSHOT_DIR="${LAZARUS_LM_SNAPSHOT_DIR:-$ROOT/lazarus-java-probe/target/probe-it-snapshots}"
