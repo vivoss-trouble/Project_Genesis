@@ -16,6 +16,7 @@ write_invalid_mode_summary() {
 from pathlib import Path
 from datetime import datetime, timezone
 import json
+import os
 import subprocess
 import sys
 
@@ -83,6 +84,7 @@ write_release_precheck_manifest() {
 from pathlib import Path
 from datetime import datetime, timezone
 import json
+import os
 import subprocess
 import sys
 
@@ -140,6 +142,7 @@ write_autonomous_summary() {
 from pathlib import Path
 from datetime import datetime, timezone
 import json
+import os
 import subprocess
 import sys
 
@@ -182,6 +185,9 @@ files = {
     "validation": evidence_dir / validation_file,
     "release_precheck": evidence_dir / "release-precheck.json",
 }
+external_evidence_path = evidence_dir / "external-evidence-collection.json"
+if os.environ.get("GENESIS_EXTERNAL_EVIDENCE_BUNDLE") or external_evidence_path.exists():
+    files["external_evidence_collection"] = external_evidence_path
 if mode != "release" and requested_mode != "auto":
     files.pop("release_precheck")
 
@@ -191,6 +197,8 @@ elif status == "failed" and current_step == "platform_contracts":
     primary = "platform_contracts"
 elif status == "failed" and current_step == "real_platform_matrix":
     primary = "real_platform_matrix"
+elif status == "failed" and current_step == "external_evidence_collection":
+    primary = "external_evidence_collection"
 elif status == "failed" and current_step == "release_packaging":
     primary = "release_packaging"
 elif status == "failed" and current_step == "validation":
@@ -864,6 +872,17 @@ elif expected_status == "failed":
             )
             sys.exit(1)
         check_real_platform_matrix(evidence)
+    elif primary == "external_evidence_collection":
+        evidence = check_metadata("external_evidence_collection", load_evidence("external_evidence_collection"))
+        if evidence.get("status") != "failed":
+            print(
+                f"[autonomous_blueprint] failed external evidence status mismatch: actual={evidence.get('status')}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not evidence.get("current_step") or not evidence.get("exit_code"):
+            print("[autonomous_blueprint] failed external evidence missing current_step or exit_code", file=sys.stderr)
+            sys.exit(1)
     elif primary == "release_packaging":
         evidence = check_metadata("release_packaging", load_evidence("release_packaging"))
         if evidence.get("status") != "failed":
@@ -962,6 +981,15 @@ CURRENT_STEP="real_platform_matrix"
 echo "[autonomous_blueprint] real platform matrix"
 GENESIS_PLATFORM_SMOKE_DIR="$EVIDENCE_DIR/platform-smoke" \
   bash "$ROOT/scripts/record_platform_smoke.sh"
+if [[ -n "${GENESIS_EXTERNAL_EVIDENCE_BUNDLE:-}" ]]; then
+  CURRENT_STEP="external_evidence_collection"
+  echo "[autonomous_blueprint] external release evidence"
+  GENESIS_PLATFORM_SMOKE_DIR="$EVIDENCE_DIR/platform-smoke" \
+  GENESIS_RELEASE_SIGNING_DIR="${GENESIS_RELEASE_SIGNING_DIR:-$EVIDENCE_DIR/release-signing}" \
+  GENESIS_REAL_PLATFORM_MATRIX_EVIDENCE="$EVIDENCE_DIR/real-platform-matrix.json" \
+    bash "$ROOT/scripts/collect_external_release_evidence.sh"
+fi
+CURRENT_STEP="real_platform_matrix"
 GENESIS_PLATFORM_SMOKE_DIR="$EVIDENCE_DIR/platform-smoke" \
 GENESIS_REAL_PLATFORM_MATRIX_EVIDENCE="$EVIDENCE_DIR/real-platform-matrix.json" \
 GENESIS_REQUIRE_REAL_PLATFORM_MATRIX="${GENESIS_REQUIRE_REAL_PLATFORM_MATRIX:-0}" \
