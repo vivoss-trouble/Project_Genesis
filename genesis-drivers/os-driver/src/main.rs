@@ -1,10 +1,13 @@
 use genesis_os_driver::{
     DriverReceipt, KeyInput, LogicalPoint, ScrollDelta, ScrollUnit, default_driver,
 };
+use genesis_platform::{
+    IpcListener, IpcStream, PlatformAdapter, RuntimeProfile,
+    desktop::{DesktopPlatformAdapter, bind_legacy_socket_path},
+    ipc::SERVICE_OS_DRIVER,
+};
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::time::Duration;
 
 #[derive(Serialize)]
 struct CliError {
@@ -12,8 +15,8 @@ struct CliError {
     error: String,
 }
 
-const DEFAULT_SOCKET_PATH: &str = "/tmp/genesis_os_driver.sock";
 const ARMED_CONFIRMATION: &str = "GENESIS_OS_DRIVER_ARMED";
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn main() {
     if let Err(error) = run() {
@@ -166,24 +169,37 @@ impl KeyOptions {
 
 #[derive(Debug)]
 struct DaemonOptions {
-    socket_path: String,
+    endpoint: DaemonEndpoint,
     armed: bool,
     confirm: Option<String>,
     viewport: ViewportOffset,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum DaemonEndpoint {
+    LocalService(&'static str),
+    LegacySocketPath(String),
+}
+
 impl DaemonOptions {
     fn parse(args: &[String]) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut socket_path = DEFAULT_SOCKET_PATH.to_string();
+        Self::parse_with_viewport(args, ViewportOffset::from_env()?)
+    }
+
+    fn parse_with_viewport(
+        args: &[String],
+        mut viewport: ViewportOffset,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut endpoint = DaemonEndpoint::LocalService(SERVICE_OS_DRIVER);
         let mut armed = false;
         let mut confirm = None;
-        let mut viewport = ViewportOffset::from_env()?;
         let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
                 "--socket" => {
                     index += 1;
-                    socket_path = parse_string(args, index, "--socket")?;
+                    endpoint =
+                        DaemonEndpoint::LegacySocketPath(parse_string(args, index, "--socket")?);
                 }
                 "--viewport-x" => {
                     index += 1;
@@ -204,11 +220,27 @@ impl DaemonOptions {
         }
 
         Ok(Self {
-            socket_path,
+            endpoint,
             armed,
             confirm,
             viewport,
         })
+    }
+}
+
+fn bind_daemon_endpoint(
+    endpoint: &DaemonEndpoint,
+) -> Result<(Box<dyn IpcListener>, String), Box<dyn std::error::Error>> {
+    let adapter = DesktopPlatformAdapter::legacy_runtime(RuntimeProfile::DesktopSafe);
+    match endpoint {
+        DaemonEndpoint::LocalService(service_name) => {
+            let address = adapter.local_service_address(service_name)?;
+            let listener = adapter.bind_local_service(service_name)?;
+            Ok((listener, format!("{address:?}")))
+        }
+        DaemonEndpoint::LegacySocketPath(path) => {
+            Ok((bind_legacy_socket_path(path)?, path.clone()))
+        }
     }
 }
 
@@ -260,37 +292,27 @@ struct DriverResponse {
 }
 
 fn run_daemon(options: &DaemonOptions) -> Result<(), Box<dyn std::error::Error>> {
-    let socket_path = Path::new(&options.socket_path);
-    if socket_path.exists() {
-        std::fs::remove_file(socket_path)?;
-    }
-    let listener = UnixListener::bind(socket_path)?;
+    let (listener, address) = bind_daemon_endpoint(&options.endpoint)?;
     eprintln!(
         "[genesis-os-driver] listening on {} armed={} viewport=({}, {})",
-        options.socket_path, options.armed, options.viewport.x, options.viewport.y
+        address, options.armed, options.viewport.x, options.viewport.y
     );
 
-    for stream in listener.incoming() {
-        match stream {
+    loop {
+        match listener.accept() {
             Ok(stream) => handle_stream(stream, options.armed, options.viewport),
             Err(error) => eprintln!("[genesis-os-driver] accept failed: {error}"),
         }
     }
-
-    Ok(())
 }
 
-fn handle_stream(stream: UnixStream, armed: bool, viewport: ViewportOffset) {
-    let Ok(writer) = stream.try_clone() else {
-        return;
-    };
-    let mut writer = writer;
-    let reader = BufReader::new(stream);
+fn handle_stream(mut stream: Box<dyn IpcStream>, armed: bool, viewport: ViewportOffset) {
     let driver = default_driver();
 
-    for line in reader.lines() {
-        let response = match line {
-            Ok(line) => handle_line(&*driver, &line, armed, viewport),
+    loop {
+        let response = match read_json_line(&mut *stream) {
+            Ok(Some(line)) => handle_line(&*driver, &line, armed, viewport),
+            Ok(None) => break,
             Err(error) => DriverResponse {
                 status: "error",
                 request_id: None,
@@ -302,7 +324,7 @@ fn handle_stream(stream: UnixStream, armed: bool, viewport: ViewportOffset) {
                 error: Some(error.to_string()),
             },
         };
-        if write_json_line(&mut writer, &response).is_err() {
+        if write_json_line(&mut *stream, &response).is_err() {
             break;
         }
     }
@@ -447,9 +469,29 @@ fn parse_key_input(value: &str) -> Result<KeyInput, String> {
     })
 }
 
-fn write_json_line<T: Serialize>(writer: &mut UnixStream, value: &T) -> Result<(), String> {
-    serde_json::to_writer(&mut *writer, value).map_err(|error| error.to_string())?;
-    writer.write_all(b"\n").map_err(|error| error.to_string())
+fn read_json_line(stream: &mut dyn IpcStream) -> Result<Option<String>, String> {
+    let mut line = Vec::new();
+    let mut byte = [0_u8; 1];
+    loop {
+        match stream.read(&mut byte) {
+            Ok(0) if line.is_empty() => return Ok(None),
+            Ok(0) => break,
+            Ok(_) if byte[0] == b'\n' => break,
+            Ok(_) => line.push(byte[0]),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn write_json_line<T: Serialize>(writer: &mut dyn IpcStream, value: &T) -> Result<(), String> {
+    let mut frame = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    frame.push(b'\n');
+    writer
+        .send(&frame, SOCKET_WRITE_TIMEOUT)
+        .map_err(|error| error.to_string())
 }
 
 fn require_armed_confirmation(confirm: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
@@ -506,4 +548,37 @@ fn print_json<T: Serialize>(value: &T) {
         "{}",
         serde_json::to_string_pretty(value).expect("JSON serialization failed")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_viewport() -> ViewportOffset {
+        ViewportOffset { x: 0.0, y: 0.0 }
+    }
+
+    #[test]
+    fn daemon_defaults_to_canonical_os_driver_service() {
+        let options = DaemonOptions::parse_with_viewport(&[], default_viewport()).unwrap();
+
+        assert_eq!(
+            options.endpoint,
+            DaemonEndpoint::LocalService(SERVICE_OS_DRIVER)
+        );
+    }
+
+    #[test]
+    fn daemon_socket_option_remains_legacy_override() {
+        let options = DaemonOptions::parse_with_viewport(
+            &["--socket".to_string(), "/tmp/custom-os.sock".to_string()],
+            default_viewport(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            options.endpoint,
+            DaemonEndpoint::LegacySocketPath("/tmp/custom-os.sock".to_string())
+        );
+    }
 }

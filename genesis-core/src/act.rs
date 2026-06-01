@@ -1,10 +1,13 @@
+use genesis_platform::desktop::{DesktopPlatformAdapter, connect_legacy_socket_path_with_timeout};
+#[cfg(test)]
+use genesis_platform::ipc::{LocalServiceAddress, LocalServiceResolver};
+use genesis_platform::ipc::{SERVICE_DYNAMIC_ACT, SERVICE_WEB_ACT};
+use genesis_platform::{IpcEndpoint, PlatformAdapter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use socket2::{Domain, SockAddr, Socket, Type};
 use std::collections::VecDeque;
-use std::io::Write;
-use std::os::fd::{FromRawFd, IntoRawFd};
-use std::os::unix::net::UnixStream;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -22,8 +25,6 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
 }
 
-const ACTUATOR_SOCKET_PATH: &str = "/tmp/genesis_act.sock";
-const DEFAULT_DYNAMIC_ACTUATOR_SOCKET_PATH: &str = "/tmp/genesis_dynamic_act.sock";
 const OS_ACTUATOR_SOCKET_ENV: &str = "GENESIS_OS_ACT_SOCKET";
 const DYNAMIC_ACTUATOR_SOCKET_ENV: &str = "GENESIS_DYNAMIC_ACT_SOCKET";
 pub const MAX_VERIFIABLE_WAIT_MS: u64 = 2_000;
@@ -452,16 +453,14 @@ fn execute_action(command: ActionCommand, auditor: &AuditLogger) -> DeliveryStat
 }
 
 fn send_to_external_actuator(action_id: &str, action: &GenesisAction) -> Result<(), String> {
-    let socket_path = match action {
-        GenesisAction::ClickPoint { .. } => std::env::var(OS_ACTUATOR_SOCKET_ENV)
-            .or_else(|_| std::env::var(DYNAMIC_ACTUATOR_SOCKET_ENV))
-            .unwrap_or_else(|_| DEFAULT_DYNAMIC_ACTUATOR_SOCKET_PATH.to_string()),
-        _ => ACTUATOR_SOCKET_PATH.to_string(),
-    };
-    let mut stream = connect_unix_stream_with_timeout(&socket_path, ACTUATOR_CONNECT_TIMEOUT)?;
-    stream
-        .set_write_timeout(Some(ACTUATOR_WRITE_TIMEOUT))
-        .map_err(|err| err.to_string())?;
+    let frame = actuator_frame(action_id, action)?;
+    if let Some(socket_path) = actuator_socket_override(action) {
+        return send_frame_to_legacy_socket(&socket_path, &frame);
+    }
+    send_frame_to_default_service(actuator_service_name(action), &frame)
+}
+
+fn actuator_frame(action_id: &str, action: &GenesisAction) -> Result<Vec<u8>, String> {
     let mut frame = if matches!(action, GenesisAction::ClickPoint { .. }) {
         let mut value = serde_json::to_value(action).map_err(|err| err.to_string())?;
         let Some(object) = value.as_object_mut() else {
@@ -476,17 +475,76 @@ fn send_to_external_actuator(action_id: &str, action: &GenesisAction) -> Result<
         serde_json::to_vec(action).map_err(|err| err.to_string())?
     };
     frame.push(b'\n');
-    stream.write_all(&frame).map_err(|err| err.to_string())
+    Ok(frame)
 }
 
-fn connect_unix_stream_with_timeout(path: &str, timeout: Duration) -> Result<UnixStream, String> {
-    let socket = Socket::new(Domain::UNIX, Type::STREAM, None).map_err(|err| err.to_string())?;
-    let address = SockAddr::unix(path).map_err(|err| err.to_string())?;
-    socket
-        .connect_timeout(&address, timeout)
+fn actuator_socket_override(action: &GenesisAction) -> Option<String> {
+    match action {
+        GenesisAction::ClickPoint { .. } => std::env::var(OS_ACTUATOR_SOCKET_ENV)
+            .or_else(|_| std::env::var(DYNAMIC_ACTUATOR_SOCKET_ENV))
+            .ok(),
+        _ => None,
+    }
+}
+
+fn actuator_service_name(action: &GenesisAction) -> &'static str {
+    match action {
+        GenesisAction::ClickPoint { .. } => SERVICE_DYNAMIC_ACT,
+        _ => SERVICE_WEB_ACT,
+    }
+}
+
+fn send_frame_to_default_service(service_name: &str, frame: &[u8]) -> Result<(), String> {
+    let endpoint = IpcEndpoint::local_service(service_name).map_err(|err| err.to_string())?;
+    let mut client = default_platform_adapter()
+        .connect_ipc_with_timeout(endpoint, ACTUATOR_CONNECT_TIMEOUT)
         .map_err(|err| err.to_string())?;
-    let fd = socket.into_raw_fd();
-    Ok(unsafe { UnixStream::from_raw_fd(fd) })
+    client
+        .send(frame, ACTUATOR_WRITE_TIMEOUT)
+        .map_err(|err| err.to_string())
+}
+
+fn default_platform_adapter() -> DesktopPlatformAdapter {
+    DesktopPlatformAdapter::legacy_runtime(genesis_platform::RuntimeProfile::DesktopSafe)
+}
+
+fn send_frame_to_legacy_socket(socket_path: &str, frame: &[u8]) -> Result<(), String> {
+    let mut stream = connect_legacy_socket_path_with_timeout(socket_path, ACTUATOR_CONNECT_TIMEOUT)
+        .map_err(|err| err.to_string())?;
+    stream
+        .send(frame, ACTUATOR_WRITE_TIMEOUT)
+        .map_err(|err| err.to_string())
+}
+
+#[cfg(test)]
+fn actuator_socket_path_with_runtime_dir(
+    action: &GenesisAction,
+    runtime_dir: PathBuf,
+) -> Result<String, String> {
+    match action {
+        GenesisAction::ClickPoint { .. } => std::env::var(OS_ACTUATOR_SOCKET_ENV)
+            .or_else(|_| std::env::var(DYNAMIC_ACTUATOR_SOCKET_ENV))
+            .or_else(|_| default_local_service_socket(SERVICE_DYNAMIC_ACT, runtime_dir)),
+        _ => default_local_service_socket(SERVICE_WEB_ACT, runtime_dir),
+    }
+}
+
+#[cfg(test)]
+fn default_local_service_socket(
+    service_name: &str,
+    runtime_dir: PathBuf,
+) -> Result<String, String> {
+    match LocalServiceResolver::new(genesis_platform::current_platform(), runtime_dir)
+        .resolve(service_name)
+        .map_err(|err| err.message)?
+    {
+        LocalServiceAddress::UnixSocket(path) => Ok(path.to_string_lossy().into_owned()),
+        LocalServiceAddress::WindowsNamedPipe(pipe_name) => Ok(pipe_name),
+        LocalServiceAddress::LoopbackTcp { host, port } => Ok(format!("{host}:{port}")),
+        LocalServiceAddress::Unsupported => Err(format!(
+            "local service is unsupported on this platform: {service_name}"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -561,5 +619,34 @@ mod tests {
 
         assert!(dispatcher.take_pending_for_verification(2).is_empty());
         assert_eq!(dispatcher.pending_actions.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn actuator_defaults_use_canonical_service_socket_files() {
+        assert!(
+            default_local_service_socket(SERVICE_WEB_ACT, PathBuf::from("/tmp"))
+                .unwrap()
+                .ends_with("genesis_act.sock")
+        );
+        assert!(
+            default_local_service_socket(SERVICE_DYNAMIC_ACT, PathBuf::from("/tmp"))
+                .unwrap()
+                .ends_with("genesis_dynamic_act.sock")
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn actuator_path_can_resolve_against_injected_runtime_dir() {
+        let action = GenesisAction::Noop {
+            reason: Some("observe".to_string()),
+        };
+
+        assert_eq!(
+            actuator_socket_path_with_runtime_dir(&action, PathBuf::from("/custom-runtime"))
+                .unwrap(),
+            "/custom-runtime/genesis_act.sock"
+        );
     }
 }

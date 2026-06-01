@@ -54,9 +54,9 @@ chmod +x start_genesis.sh
 
 日志位置：
 
-- Fantasy Dummy：`/tmp/genesis_dummy.log`
-- Web Arena：`/tmp/genesis_web_arena.log`
-- LLM daemon：`/tmp/genesis_llm.log`
+- Fantasy Dummy：`${GENESIS_RUNTIME_DIR:-<system temp dir>}/genesis_dummy.log`
+- Web Arena：`${GENESIS_RUNTIME_DIR:-<system temp dir>}/genesis_web_arena.log`
+- LLM daemon：`${GENESIS_RUNTIME_DIR:-<system temp dir>}/genesis_llm.log`
 - Audit black box：`.genesis-state/audit.jsonl`
 
 真实网页靶场模式：
@@ -198,12 +198,16 @@ cargo run -p genesis-replay -- brain-mock --audit .genesis-state/audit.jsonl --e
 
 ### Brain 返回 `Connection refused`
 
-原因：LLM daemon 未启动、崩溃，或 `/tmp/genesis_brain.sock` 不存在。
+原因：LLM daemon 未启动、崩溃，或 `${GENESIS_BRAIN_SOCKET:-<system temp dir>/genesis_brain.sock}` 不存在。
 
 处理：
 
 ```bash
-rm -f /tmp/genesis_brain.sock
+rm -f "${GENESIS_BRAIN_SOCKET:-$(python3 - <<'PY'
+import os, tempfile
+print(os.path.join(tempfile.gettempdir(), "genesis_brain.sock"))
+PY
+)}"
 .venv-llm/bin/python genesis-daemons/llm-daemon-python/llm_daemon.py
 ```
 
@@ -211,12 +215,16 @@ rm -f /tmp/genesis_brain.sock
 
 ### Actuator 无法执行动作
 
-原因：Fantasy Dummy 未启动，或 `/tmp/genesis_act.sock` 残留。
+原因：Fantasy Dummy 未启动，或 `${GENESIS_ACT_SOCKET:-<system temp dir>/genesis_act.sock}` 残留。
 
 处理：
 
 ```bash
-rm -f /tmp/genesis_act.sock
+rm -f "${GENESIS_ACT_SOCKET:-$(python3 - <<'PY'
+import os, tempfile
+print(os.path.join(tempfile.gettempdir(), "genesis_act.sock"))
+PY
+)}"
 cargo run -p fantasy-dummy
 ```
 
@@ -242,5 +250,5 @@ cargo run -p fantasy-dummy
 
 - 停止 Fantasy Dummy
 - 停止 LLM daemon
-- 删除 `/tmp/genesis_brain.sock`
-- 删除 `/tmp/genesis_act.sock`
+- 删除 `${GENESIS_BRAIN_SOCKET:-<system temp dir>/genesis_brain.sock}`
+- 删除 `${GENESIS_ACT_SOCKET:-<system temp dir>/genesis_act.sock}`

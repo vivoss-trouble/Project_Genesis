@@ -4,20 +4,25 @@ import math
 import os
 import queue
 import random
+import sys
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from daemon_transport import parse_float_env, parse_int_env
 from snapshot_committer import SnapshotCommitter
 
 
-MAX_ACTION_QUEUE = int(os.environ.get("GENESIS_DYNAMIC_ACTION_QUEUE", "32"))
-FRAME_RATE = int(os.environ.get("GENESIS_DYNAMIC_FPS", "60"))
-WIDTH = int(os.environ.get("GENESIS_DYNAMIC_WIDTH", "640"))
-HEIGHT = int(os.environ.get("GENESIS_DYNAMIC_HEIGHT", "360"))
-FRESH_FRAME_TOLERANCE = int(os.environ.get("GENESIS_DYNAMIC_FRESH_FRAME_TOLERANCE", "2"))
-MAX_SPATIAL_DRIFT_PX = float(os.environ.get("GENESIS_DYNAMIC_MAX_DRIFT_PX", "6"))
+MAX_ACTION_QUEUE = parse_int_env("GENESIS_DYNAMIC_ACTION_QUEUE", 32, 1)
+FRAME_RATE = parse_int_env("GENESIS_DYNAMIC_FPS", 60, 1)
+WIDTH = parse_int_env("GENESIS_DYNAMIC_WIDTH", 640, 1)
+HEIGHT = parse_int_env("GENESIS_DYNAMIC_HEIGHT", 360, 1)
+FRESH_FRAME_TOLERANCE = parse_int_env("GENESIS_DYNAMIC_FRESH_FRAME_TOLERANCE", 2, 0)
+MAX_SPATIAL_DRIFT_PX = parse_float_env("GENESIS_DYNAMIC_MAX_DRIFT_PX", 6.0, 0.0)
 TARGET_ID = os.environ.get("GENESIS_DYNAMIC_TARGET_ID", "heal")
 HEADLESS = os.environ.get("GENESIS_DYNAMIC_HEADLESS", "1") != "0"
 SELFTEST_MODE = os.environ.get("GENESIS_DYNAMIC_SELFTEST_MODE", "0") == "1"

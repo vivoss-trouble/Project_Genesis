@@ -1,3 +1,5 @@
+use genesis_platform::desktop::DesktopPlatformAdapter;
+use genesis_platform::{PlatformAdapter, RuntimeProfile};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::{self, OpenOptions};
@@ -418,16 +420,17 @@ fn current_ts() -> u64 {
 }
 
 fn capture_anchor_snapshot() -> Option<String> {
+    let platform = DesktopPlatformAdapter::legacy_runtime(RuntimeProfile::DesktopSafe);
     let source = std::path::Path::new(".genesis-state/anchor.mmap");
-    if !source.exists() {
+    if !platform.path_exists(source).ok()? {
         return None;
     }
 
     let snapshot_dir = std::path::Path::new(".genesis-state/replay-snapshots");
-    fs::create_dir_all(snapshot_dir).ok()?;
+    platform.ensure_private_dir(snapshot_dir).ok()?;
 
     let snapshot_path = snapshot_dir.join(format!("anchor-{}.mmap", current_ts()));
-    fs::copy(source, &snapshot_path).ok()?;
+    platform.copy_file(source, &snapshot_path).ok()?;
     snapshot_path.to_str().map(|path| path.to_string())
 }
 

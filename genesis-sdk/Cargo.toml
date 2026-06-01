@@ -1,0 +1,8 @@
+[package]
+name = "genesis-sdk"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+genesis-platform = { path = "../genesis-platform" }

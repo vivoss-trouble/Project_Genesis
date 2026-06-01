@@ -1,15 +1,20 @@
+use genesis_platform::{
+    IpcListener, IpcStream, PlatformAdapter, RuntimeProfile,
+    desktop::{DesktopPlatformAdapter, bind_legacy_socket_path},
+    ipc::SERVICE_VISION,
+};
 use serde::{Deserialize, Serialize};
+#[cfg(any(test, target_os = "macos"))]
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(target_os = "macos")]
+use std::time::Instant;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_SOCKET_PATH: &str = "/tmp/genesis_vision_daemon.sock";
 const DEFAULT_HZ: f64 = 10.0;
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn main() {
     if let Err(error) = run() {
@@ -57,22 +62,43 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 #[derive(Debug)]
 struct DaemonOptions {
-    socket_path: String,
+    endpoint: DaemonEndpoint,
     hz: f64,
+}
+
+#[derive(Debug, PartialEq)]
+enum DaemonEndpoint {
+    LocalService(&'static str),
+    LegacySocketPath(String),
 }
 
 impl DaemonOptions {
     fn parse(args: &[String]) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut socket_path = std::env::var("GENESIS_VISION_SOCKET")
-            .unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string());
-        let mut hz = parse_env_f64("GENESIS_VISION_HZ")?.unwrap_or(DEFAULT_HZ);
+        Self::parse_with_env(
+            args,
+            std::env::var("GENESIS_VISION_SOCKET").ok(),
+            parse_env_f64("GENESIS_VISION_HZ")?,
+        )
+    }
+
+    fn parse_with_env(
+        args: &[String],
+        vision_socket: Option<String>,
+        vision_hz: Option<f64>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut endpoint = match vision_socket {
+            Some(value) => DaemonEndpoint::LegacySocketPath(value),
+            None => DaemonEndpoint::LocalService(SERVICE_VISION),
+        };
+        let mut hz = vision_hz.unwrap_or(DEFAULT_HZ);
 
         let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
                 "--socket" => {
                     index += 1;
-                    socket_path = parse_string(args, index, "--socket")?;
+                    endpoint =
+                        DaemonEndpoint::LegacySocketPath(parse_string(args, index, "--socket")?);
                 }
                 "--hz" => {
                     index += 1;
@@ -87,7 +113,73 @@ impl DaemonOptions {
             return Err("vision daemon --hz must be finite and within 0..120".into());
         }
 
-        Ok(Self { socket_path, hz })
+        Ok(Self { endpoint, hz })
+    }
+}
+
+fn bind_daemon_endpoint(
+    endpoint: &DaemonEndpoint,
+) -> Result<(Box<dyn IpcListener>, String), Box<dyn std::error::Error>> {
+    let adapter = DesktopPlatformAdapter::legacy_runtime(RuntimeProfile::DesktopSafe);
+    match endpoint {
+        DaemonEndpoint::LocalService(service_name) => {
+            let address = adapter.local_service_address(service_name)?;
+            let listener = adapter.bind_local_service(service_name)?;
+            Ok((listener, format!("{address:?}")))
+        }
+        DaemonEndpoint::LegacySocketPath(path) => {
+            Ok((bind_legacy_socket_path(path)?, path.clone()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod daemon_options_tests {
+    use super::*;
+
+    #[test]
+    fn daemon_defaults_to_canonical_vision_service() {
+        let options = DaemonOptions::parse_with_env(&[], None, None).unwrap();
+
+        assert_eq!(
+            options.endpoint,
+            DaemonEndpoint::LocalService(SERVICE_VISION)
+        );
+        assert_eq!(options.hz, DEFAULT_HZ);
+    }
+
+    #[test]
+    fn daemon_socket_option_remains_legacy_override() {
+        let options = DaemonOptions::parse_with_env(
+            &[
+                "--socket".to_string(),
+                "/tmp/custom-vision.sock".to_string(),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            options.endpoint,
+            DaemonEndpoint::LegacySocketPath("/tmp/custom-vision.sock".to_string())
+        );
+    }
+
+    #[test]
+    fn daemon_env_socket_remains_legacy_override() {
+        let options = DaemonOptions::parse_with_env(
+            &[],
+            Some("/tmp/env-vision.sock".to_string()),
+            Some(12.0),
+        )
+        .unwrap();
+
+        assert_eq!(
+            options.endpoint,
+            DaemonEndpoint::LegacySocketPath("/tmp/env-vision.sock".to_string())
+        );
+        assert_eq!(options.hz, 12.0);
     }
 }
 
@@ -270,11 +362,7 @@ struct VisionErrorResponse {
 }
 
 fn run_daemon(options: &DaemonOptions) -> Result<(), Box<dyn std::error::Error>> {
-    if Path::new(&options.socket_path).exists() {
-        std::fs::remove_file(&options.socket_path)?;
-    }
-
-    let listener = UnixListener::bind(&options.socket_path)?;
+    let (listener, address) = bind_daemon_endpoint(&options.endpoint)?;
     let latest = Arc::new(Mutex::new(capture_frame_state(1)));
     let next_frame_id = Arc::new(AtomicU64::new(2));
     spawn_sampler(latest.clone(), next_frame_id, options.hz);
@@ -283,14 +371,14 @@ fn run_daemon(options: &DaemonOptions) -> Result<(), Box<dyn std::error::Error>>
         "{}",
         serde_json::to_string(&serde_json::json!({
             "status": "listening",
-            "socket": options.socket_path,
+            "socket": address,
             "hz": options.hz,
             "protocol": "genesis-vision-frame-state-v1"
         }))?
     );
 
-    for stream in listener.incoming() {
-        match stream {
+    loop {
+        match listener.accept() {
             Ok(stream) => {
                 if let Err(error) = handle_client(stream, latest.clone()) {
                     eprintln!("[genesis-frame-grabber] client error: {error}");
@@ -299,8 +387,6 @@ fn run_daemon(options: &DaemonOptions) -> Result<(), Box<dyn std::error::Error>>
             Err(error) => eprintln!("[genesis-frame-grabber] accept error: {error}"),
         }
     }
-
-    Ok(())
 }
 
 fn spawn_sampler(latest: Arc<Mutex<FrameState>>, next_frame_id: Arc<AtomicU64>, hz: f64) {
@@ -321,18 +407,12 @@ fn spawn_sampler(latest: Arc<Mutex<FrameState>>, next_frame_id: Arc<AtomicU64>, 
 }
 
 fn handle_client(
-    stream: UnixStream,
+    mut stream: Box<dyn IpcStream>,
     latest: Arc<Mutex<FrameState>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let reader_stream = stream.try_clone()?;
-    let mut reader = BufReader::new(reader_stream);
-    let mut writer = stream;
-    let mut line = String::new();
-
-    while reader.read_line(&mut line)? > 0 {
+    while let Some(line) = read_json_line(&mut *stream)? {
         let raw = line.trim();
         if raw.is_empty() {
-            line.clear();
             continue;
         }
 
@@ -349,7 +429,7 @@ fn handle_client(
                     request_id: request.request_id,
                     frame_state: state,
                 };
-                writeln!(writer, "{}", serde_json::to_string(&response)?)?;
+                write_json_line(&mut *stream, &response)?;
             }
             Ok(request) => {
                 let response = VisionErrorResponse {
@@ -357,7 +437,7 @@ fn handle_client(
                     request_id: request.request_id,
                     error: "unsupported act; use frame_state, state, or probe".to_string(),
                 };
-                writeln!(writer, "{}", serde_json::to_string(&response)?)?;
+                write_json_line(&mut *stream, &response)?;
             }
             Err(error) => {
                 let response = VisionErrorResponse {
@@ -365,13 +445,37 @@ fn handle_client(
                     request_id: None,
                     error: format!("invalid JSON request: {error}"),
                 };
-                writeln!(writer, "{}", serde_json::to_string(&response)?)?;
+                write_json_line(&mut *stream, &response)?;
             }
         }
-        writer.flush()?;
-        line.clear();
     }
 
+    Ok(())
+}
+
+fn read_json_line(
+    stream: &mut dyn IpcStream,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let mut line = Vec::new();
+    let mut byte = [0_u8; 1];
+    loop {
+        match stream.read(&mut byte)? {
+            0 if line.is_empty() => return Ok(None),
+            0 => break,
+            _ if byte[0] == b'\n' => break,
+            _ => line.push(byte[0]),
+        }
+    }
+    Ok(Some(String::from_utf8(line)?))
+}
+
+fn write_json_line<T: Serialize>(
+    writer: &mut dyn IpcStream,
+    value: &T,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut frame = serde_json::to_vec(value)?;
+    frame.push(b'\n');
+    writer.send(&frame, SOCKET_WRITE_TIMEOUT)?;
     Ok(())
 }
 
@@ -469,6 +573,7 @@ struct RawMarkerDetection {
     threshold: MarkerThreshold,
 }
 
+#[cfg(any(test, target_os = "macos"))]
 #[derive(Debug)]
 struct RawMarkerCandidate {
     pixel_center: PixelPoint,
@@ -495,6 +600,7 @@ fn detect_marker_from_bgra_like_buffer(
         })
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn detect_marker_candidates_from_bgra_like_buffer(
     bytes: &[u8],
     width: usize,
@@ -606,12 +712,14 @@ fn detect_marker_candidates_from_bgra_like_buffer(
     candidates
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn is_marker_pixel(pixel: &[u8], threshold: &MarkerThreshold) -> bool {
     color_candidates(pixel, threshold)
         .iter()
         .any(|candidate| candidate.marker_match)
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn color_candidates(pixel: &[u8], threshold: &MarkerThreshold) -> Vec<ColorCandidate> {
     let raw_candidates = [
         ("RGBA", pixel[0], pixel[1], pixel[2], pixel[3]),
@@ -635,6 +743,7 @@ fn color_candidates(pixel: &[u8], threshold: &MarkerThreshold) -> Vec<ColorCandi
         .collect()
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn sample_pixel_from_bgra_like_buffer(
     bytes: &[u8],
     width: usize,
@@ -671,6 +780,7 @@ fn sample_pixel_from_bgra_like_buffer(
     })
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn expected_marker_sample_point() -> Option<LogicalPoint> {
     let x = std::env::var("GENESIS_VISION_SAMPLE_X")
         .ok()?

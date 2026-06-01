@@ -1,14 +1,17 @@
+use genesis_platform::desktop::loopback_http::{
+    LoopbackHttpRequest, LoopbackHttpResponse, serve as serve_loopback_http,
+};
+use genesis_platform::desktop::{DesktopPlatformAdapter, bind_legacy_socket_path};
+use genesis_platform::ipc::{LocalServiceAddress, SERVICE_WEB_ACT};
+use genesis_platform::{IpcListener, IpcStream, PlatformAdapter};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const ACT_SOCKET_PATH: &str = "/tmp/genesis_act.sock";
+const ACT_SOCKET_ENV: &str = "GENESIS_ACT_SOCKET";
 const HTTP_ADDR: &str = "127.0.0.1:4767";
 
 #[derive(Debug)]
@@ -83,16 +86,15 @@ fn spawn_entropy_loop(state: Arc<Mutex<DummyState>>) {
 }
 
 fn spawn_act_socket(state: Arc<Mutex<DummyState>>) -> std::io::Result<()> {
-    let _ = fs::remove_file(ACT_SOCKET_PATH);
-    let listener = UnixListener::bind(ACT_SOCKET_PATH)?;
+    let listener = act_listener()?;
     println!(
         "[fantasy-dummy] action socket listening on {}",
-        ACT_SOCKET_PATH
+        act_socket_path()?.display()
     );
 
     thread::spawn(move || {
-        for stream in listener.incoming() {
-            match stream {
+        loop {
+            match listener.accept() {
                 Ok(stream) => handle_action_stream(stream, &state),
                 Err(err) => eprintln!("[fantasy-dummy] action accept failed: {}", err),
             }
@@ -102,12 +104,58 @@ fn spawn_act_socket(state: Arc<Mutex<DummyState>>) -> std::io::Result<()> {
     Ok(())
 }
 
-fn handle_action_stream(stream: UnixStream, state: &Arc<Mutex<DummyState>>) {
-    let mut line = String::new();
-    if let Err(err) = BufReader::new(stream).read_line(&mut line) {
-        eprintln!("[fantasy-dummy] action read failed: {}", err);
-        return;
+fn act_listener() -> std::io::Result<Box<dyn IpcListener>> {
+    if let Ok(path) = std::env::var(ACT_SOCKET_ENV) {
+        return bind_legacy_socket_path(&path).map_err(std::io::Error::other);
     }
+    default_platform_adapter()
+        .bind_local_service(SERVICE_WEB_ACT)
+        .map_err(std::io::Error::other)
+}
+
+fn default_platform_adapter() -> DesktopPlatformAdapter {
+    DesktopPlatformAdapter::legacy_runtime(genesis_platform::RuntimeProfile::DesktopSafe)
+}
+
+fn act_socket_path() -> std::io::Result<PathBuf> {
+    if let Ok(path) = std::env::var(ACT_SOCKET_ENV) {
+        return Ok(PathBuf::from(path));
+    }
+    act_socket_path_from_adapter(&default_platform_adapter())
+}
+
+#[cfg(test)]
+fn act_socket_path_with_runtime_dir(runtime_dir: PathBuf) -> std::io::Result<PathBuf> {
+    let adapter = DesktopPlatformAdapter::with_roots(
+        genesis_platform::current_platform(),
+        genesis_platform::RuntimeProfile::DesktopSafe,
+        runtime_dir.clone(),
+        runtime_dir.clone(),
+        runtime_dir,
+    );
+    act_socket_path_from_adapter(&adapter)
+}
+
+fn act_socket_path_from_adapter(adapter: &DesktopPlatformAdapter) -> std::io::Result<PathBuf> {
+    match adapter
+        .local_service_address(SERVICE_WEB_ACT)
+        .map_err(std::io::Error::other)?
+    {
+        LocalServiceAddress::UnixSocket(path) => Ok(path),
+        other => Err(std::io::Error::other(format!(
+            "fantasy-dummy requires a Unix socket address, got {other:?}"
+        ))),
+    }
+}
+
+fn handle_action_stream(mut stream: Box<dyn IpcStream>, state: &Arc<Mutex<DummyState>>) {
+    let line = match read_line_from_stream(stream.as_mut()) {
+        Ok(line) => line,
+        Err(err) => {
+            eprintln!("[fantasy-dummy] action read failed: {}", err);
+            return;
+        }
+    };
 
     let action = match serde_json::from_str::<GenesisAction>(line.trim_end()) {
         Ok(action) => action,
@@ -118,6 +166,25 @@ fn handle_action_stream(stream: UnixStream, state: &Arc<Mutex<DummyState>>) {
     };
 
     apply_action(action, state);
+}
+
+fn read_line_from_stream(stream: &mut dyn IpcStream) -> Result<String, String> {
+    let mut line = Vec::new();
+    let mut buffer = [0_u8; 256];
+    loop {
+        let read = stream.read(&mut buffer).map_err(|err| err.to_string())?;
+        if read == 0 {
+            break;
+        }
+        line.extend_from_slice(&buffer[..read]);
+        if line.contains(&b'\n') {
+            break;
+        }
+        if line.len() > 64 * 1024 {
+            return Err("line exceeds 64 KiB".to_string());
+        }
+    }
+    String::from_utf8(line).map_err(|err| err.to_string())
 }
 
 fn apply_action(action: GenesisAction, state: &Arc<Mutex<DummyState>>) {
@@ -182,38 +249,29 @@ fn apply_action(action: GenesisAction, state: &Arc<Mutex<DummyState>>) {
 }
 
 fn serve_http(state: Arc<Mutex<DummyState>>) -> std::io::Result<()> {
-    let listener = TcpListener::bind(HTTP_ADDR)?;
     println!("[fantasy-dummy] UI available at http://{}", HTTP_ADDR);
-
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => handle_http(stream, &state),
-            Err(err) => eprintln!("[fantasy-dummy] http accept failed: {}", err),
-        }
-    }
-
-    Ok(())
+    serve_loopback_http(HTTP_ADDR, |request| handle_http(request, &state))
+        .map_err(std::io::Error::other)
 }
 
-fn handle_http(mut stream: TcpStream, state: &Arc<Mutex<DummyState>>) {
-    let mut buffer = [0u8; 2048];
-    let read = match stream.read(&mut buffer) {
-        Ok(read) => read,
-        Err(_) => return,
-    };
-    let request = String::from_utf8_lossy(&buffer[..read]);
-    let request_line = request.lines().next().unwrap_or_default();
-
-    if request_line.starts_with("GET /state ") {
+fn handle_http(
+    request: &LoopbackHttpRequest,
+    state: &Arc<Mutex<DummyState>>,
+) -> LoopbackHttpResponse {
+    if request.method == "GET" && request.path == "/state" {
         let body = state_json(state);
-        respond(&mut stream, "200 OK", "application/json", &body);
-    } else if request_line.starts_with("POST /heal ") {
+        respond("200 OK", "application/json", body.into_bytes())
+    } else if request.method == "POST" && request.path == "/heal" {
         let mut state = state.lock().expect("dummy state poisoned");
         push_log(&mut state, "Manual heal button clicked".to_string());
         state.health = 100;
-        respond(&mut stream, "204 No Content", "text/plain", "");
+        respond("204 No Content", "text/plain", Vec::new())
     } else {
-        respond(&mut stream, "200 OK", "text/html; charset=utf-8", HTML);
+        respond(
+            "200 OK",
+            "text/html; charset=utf-8",
+            HTML.as_bytes().to_vec(),
+        )
     }
 }
 
@@ -228,15 +286,8 @@ fn state_json(state: &Arc<Mutex<DummyState>>) -> String {
     serde_json::to_string(&view).unwrap_or_else(|_| "{}".to_string())
 }
 
-fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &str) {
-    let response = format!(
-        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        status,
-        content_type,
-        body.len(),
-        body
-    );
-    let _ = stream.write_all(response.as_bytes());
+fn respond(status: &str, content_type: &str, body: Vec<u8>) -> LoopbackHttpResponse {
+    LoopbackHttpResponse::new(status, content_type, body)
 }
 
 fn push_log(state: &mut DummyState, message: String) {
@@ -367,3 +418,16 @@ const HTML: &str = r#"<!DOCTYPE html>
 </body>
 </html>
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn default_action_socket_preserves_legacy_filename() {
+        let path = act_socket_path_with_runtime_dir(PathBuf::from("/custom-runtime"))
+            .expect("socket path");
+        assert_eq!(path, PathBuf::from("/custom-runtime/genesis_act.sock"));
+    }
+}

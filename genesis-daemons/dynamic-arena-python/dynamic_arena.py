@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import json
 import os
-import socket
+import sys
 import threading
 import time
 import urllib.request
+from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from daemon_transport import connect_unix_stream_socket
 from arena_engine import DynamicArenaEngine, render_loop
 from uds_server import ACTION_SOCKET_PATH, STATE_HOST, STATE_PORT, serve_state, start_action_socket
 
@@ -101,8 +105,7 @@ def smoke_server() -> None:
         "frame_id": state["frame_id"],
         "reason": "manual smoke click",
     }
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.connect(ACTION_SOCKET_PATH)
+    with connect_unix_stream_socket(ACTION_SOCKET_PATH) as client:
         client.sendall(json.dumps(payload).encode("utf-8") + b"\n")
         print(client.recv(4096).decode("utf-8", errors="replace").strip())
 

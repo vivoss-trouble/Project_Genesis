@@ -16,7 +16,7 @@ const NATIVE_SHUTDOWN_STUCK_AFTER: Duration = Duration::from_millis(250);
 
 use native_plugin::{LoadedPlugin, load_native_plugin, trigger_loaded_plugin};
 use plan_runtime::PlanRuntime;
-use wasm_plugin::{LoadedWasmPlugin, load_wasm_plugin_from_path, trigger_loaded_wasm_plugin};
+use wasm_plugin::{LoadedWasmPlugin, load_wasm_plugin_from_bytes, trigger_loaded_wasm_plugin};
 
 pub struct GenesisKernel {
     plugins: HashMap<String, LoadedPlugin>,
@@ -61,9 +61,11 @@ impl GenesisKernel {
         }
     }
 
-    pub fn load_wasm_plugin(&mut self, path: &str) -> Result<(), String> {
-        self.wasm_plugins
-            .insert(path.to_string(), load_wasm_plugin_from_path(path)?);
+    pub fn load_wasm_plugin(&mut self, path: &str, wasm_bytes: &[u8]) -> Result<(), String> {
+        self.wasm_plugins.insert(
+            path.to_string(),
+            load_wasm_plugin_from_bytes(path, wasm_bytes)?,
+        );
         Ok(())
     }
 
@@ -447,8 +449,9 @@ mod tests {
         let wasm_path = write_wasm_fixture();
         let mut kernel = GenesisKernel::new(AuditLogger::new(16));
 
+        let wasm_bytes = fs::read(&wasm_path).expect("read wasm fixture");
         kernel
-            .load_wasm_plugin(wasm_path.to_str().expect("utf-8 fixture path"))
+            .load_wasm_plugin(wasm_path.to_str().expect("utf-8 fixture path"), &wasm_bytes)
             .expect("load wasm plugin");
         let health = kernel.health();
         assert_eq!(health.native_plugin_count, 0);

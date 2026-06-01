@@ -23,14 +23,22 @@ cargo run -p genesis-frame-grabber
 Run the low-entropy Vision daemon:
 
 ```bash
-cargo run -p genesis-frame-grabber -- daemon --socket /tmp/genesis_vision_daemon.sock --hz 10
+cargo run -p genesis-frame-grabber -- daemon --hz 10
 ```
 
 Request the latest committed frame state over JSONL:
 
 ```bash
-printf '{"request_id":"state-1","act":"frame_state"}\n' | nc -U /tmp/genesis_vision_daemon.sock
+printf '{"request_id":"state-1","act":"frame_state"}\n' | nc -U "$(python3 - <<'PY'
+import os, tempfile
+print(os.path.join(tempfile.gettempdir(), "genesis_vision_daemon.sock"))
+PY
+)"
 ```
+
+The default daemon endpoint is the canonical `genesis-vision` local service. On
+macOS/Linux this currently maps to `<system temp dir>/genesis_vision_daemon.sock`.
+Use `--socket` or `GENESIS_VISION_SOCKET` when a fixed legacy path is required.
 
 The daemon emits only physical constants and timestamps:
 
@@ -74,7 +82,7 @@ surface instead of the full display:
 
 ```bash
 GENESIS_VISION_WINDOW_ID=12345 \
-  cargo run -p genesis-frame-grabber -- daemon --socket /tmp/genesis_vision_daemon.sock --hz 10
+  cargo run -p genesis-frame-grabber -- daemon --hz 10
 ```
 
 When `GENESIS_VISION_WINDOW_ID` is present:

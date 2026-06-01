@@ -1,4 +1,9 @@
 // genesis-core/src/main.rs
+#![cfg_attr(
+    not(any(feature = "native-runtime", feature = "wasm-runtime")),
+    allow(dead_code)
+)]
+
 mod act;
 mod audit;
 mod hot_reload;
@@ -7,9 +12,10 @@ mod sense;
 mod verify;
 mod watchdog;
 use audit::{AuditEvent, AuditLogger};
+use genesis_platform::desktop::DesktopPlatformAdapter;
+use genesis_platform::{PlatformAdapter, RuntimeProfile};
 use kernel::GenesisKernel;
 use std::collections::HashMap;
-use std::fs;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -17,15 +23,17 @@ use std::time::{Duration, Instant};
 const GENESIS_ALLOW_NATIVE_PLUGINS: &str = "GENESIS_ALLOW_NATIVE_PLUGINS";
 const GENESIS_NATIVE_PLUGIN_TRUST: &str = "GENESIS_NATIVE_PLUGIN_TRUST";
 const GENESIS_RUNTIME_PROFILE: &str = "GENESIS_RUNTIME_PROFILE";
+const NATIVE_PLUGIN_EXTENSIONS: &[&str] = &["dylib", "so", "dll"];
 
 fn main() {
     println!("🌌 创世纪微核 (Genesis Core) - 永不停机版本启动...");
     let auditor = AuditLogger::new(4096);
+    let platform = DesktopPlatformAdapter::legacy_runtime(RuntimeProfile::DesktopSafe);
     let kernel = Arc::new(Mutex::new(GenesisKernel::new(auditor.clone())));
     let k = kernel.clone();
 
     // 锁定绝对物理坐标
-    let current_dir = std::env::current_dir().unwrap();
+    let current_dir = platform.current_dir().unwrap();
     let watch_path = current_dir.join("genesis-plugins");
     let watch_path_str = watch_path.to_str().unwrap().to_string();
 
@@ -34,7 +42,7 @@ fn main() {
     let allow_native_plugins = native_plugins_enabled();
     if !allow_native_plugins {
         println!(
-            "[微核] 🔒 原生 .so/.dylib 插件默认禁用；仅明确 development/local profile + {}=1 + {}=dev-only 才会加载可信插件。",
+            "[微核] 🔒 原生 .so/.dylib/.dll 插件默认禁用；仅明确 development/local profile + {}=1 + {}=dev-only 才会加载可信插件。",
             GENESIS_ALLOW_NATIVE_PLUGINS, GENESIS_NATIVE_PLUGIN_TRUST
         );
     }
@@ -43,7 +51,7 @@ fn main() {
     let mut last_reload_at: HashMap<String, Instant> = HashMap::new();
     if allow_native_plugins {
         hot_reload::start_watcher(&watch_path_str, move |path| {
-            if path.ends_with(".dylib") || path.ends_with(".so") {
+            if is_native_plugin_path(path) {
                 let now = Instant::now();
                 if last_reload_at
                     .get(path)
@@ -66,19 +74,18 @@ fn main() {
 
     println!("[微核] 🧿 全知之眼已睁开，心跳脉冲发生器启动...");
 
-    let plugin_entries = fs::read_dir(&watch_path).ok();
+    let plugin_entries = platform.read_dir_paths(&watch_path).ok();
     if let Some(entries) = plugin_entries {
         let mut wasm_plugin_paths = Vec::new();
         let mut native_plugin_paths = Vec::new();
-        for path in entries
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-        {
+        for path in entries {
             let extension = path.extension().and_then(|ext| ext.to_str());
             match extension {
                 Some("wasm") => wasm_plugin_paths.push(path),
-                Some("dylib" | "so") if allow_native_plugins => native_plugin_paths.push(path),
-                Some("dylib" | "so") => {
+                Some(ext) if is_native_plugin_extension(ext) && allow_native_plugins => {
+                    native_plugin_paths.push(path)
+                }
+                Some(ext) if is_native_plugin_extension(ext) => {
                     println!(
                         "[微核] 🔒 跳过原生插件 [{}]；仅 development/local profile + {}=1 + {}=dev-only 会加载可信插件。",
                         path.display(),
@@ -94,13 +101,24 @@ fn main() {
 
         let mut guard = kernel.lock().unwrap();
         for plugin_path in wasm_plugin_paths {
-            let Some(plugin_path) = plugin_path.to_str() else {
+            let Some(plugin_path_str) = plugin_path.to_str() else {
                 continue;
             };
 
-            match guard.load_wasm_plugin(plugin_path) {
-                Ok(_) => println!("[微核] ✅ 初始 Wasm 插件装载完成: {}", plugin_path),
-                Err(e) => println!("[微核] ❌ 初始 Wasm 插件装载失败 [{}]: {}", plugin_path, e),
+            let Ok(wasm_bytes) = platform.read_file(plugin_path.as_path()) else {
+                println!(
+                    "[微核] ❌ 初始 Wasm 插件读取失败 [{}]",
+                    plugin_path.display()
+                );
+                continue;
+            };
+
+            match guard.load_wasm_plugin(plugin_path_str, &wasm_bytes) {
+                Ok(_) => println!("[微核] ✅ 初始 Wasm 插件装载完成: {}", plugin_path_str),
+                Err(e) => println!(
+                    "[微核] ❌ 初始 Wasm 插件装载失败 [{}]: {}",
+                    plugin_path_str, e
+                ),
             }
         }
 
@@ -141,6 +159,17 @@ fn main() {
 
         guard.trigger_all(tick, &payload);
     }
+}
+
+fn is_native_plugin_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(is_native_plugin_extension)
+}
+
+fn is_native_plugin_extension(extension: &str) -> bool {
+    NATIVE_PLUGIN_EXTENSIONS.contains(&extension)
 }
 
 fn native_plugins_enabled() -> bool {
@@ -192,7 +221,21 @@ fn runtime_profile_allows_native_plugins(value: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{native_plugins_enabled_for, parse_native_plugin_flag, parse_native_plugin_trust};
+    use super::{
+        is_native_plugin_extension, is_native_plugin_path, native_plugins_enabled_for,
+        parse_native_plugin_flag, parse_native_plugin_trust,
+    };
+
+    #[test]
+    fn native_plugin_extensions_cover_desktop_dev_targets() {
+        assert!(is_native_plugin_extension("dylib"));
+        assert!(is_native_plugin_extension("so"));
+        assert!(is_native_plugin_extension("dll"));
+        assert!(is_native_plugin_path("genesis-plugins/libplugin_dummy.dll"));
+        assert!(!is_native_plugin_path(
+            "genesis-plugins/plugin-dummy-wasm.wasm"
+        ));
+    }
 
     #[test]
     fn native_plugin_loading_is_opt_in() {

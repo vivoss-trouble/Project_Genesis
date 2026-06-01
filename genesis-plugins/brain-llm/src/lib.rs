@@ -1,13 +1,19 @@
 use genesis_contracts::declare_genesis_plugin;
 use genesis_contracts::sdk::{GenesisContext, GenesisPlugin, GenesisResult};
 use genesis_contracts::wire::{GENESIS_ERROR_INTERNAL, GENESIS_ERROR_INVALID_INPUT};
+use genesis_platform::desktop::{DesktopPlatformAdapter, connect_legacy_socket_path_with_timeout};
+#[cfg(test)]
+use genesis_platform::ipc::LocalServiceAddress;
+use genesis_platform::ipc::SERVICE_BRAIN;
+use genesis_platform::{IpcEndpoint, IpcStream, PlatformAdapter, PlatformErrorKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::io::{ErrorKind, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
+use std::time::Duration;
 
-const SOCKET_PATH: &str = "/tmp/genesis_brain.sock";
+const BRAIN_SOCKET_ENV: &str = "GENESIS_BRAIN_SOCKET";
+const BRAIN_CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
+const BRAIN_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Serialize)]
 struct BrainRequest<'a> {
@@ -28,7 +34,7 @@ enum BrainState {
     Idle,
     Pending {
         task_id: String,
-        stream: UnixStream,
+        stream: Box<dyn IpcStream>,
         read_buf: Vec<u8>,
     },
 }
@@ -69,7 +75,7 @@ impl BrainPlugin {
         };
         frame.push(b'\n');
 
-        let mut stream = match UnixStream::connect(SOCKET_PATH) {
+        let mut stream = match connect_brain_stream() {
             Ok(stream) => stream,
             Err(err) => {
                 return GenesisResult::error(
@@ -79,7 +85,7 @@ impl BrainPlugin {
             }
         };
 
-        if let Err(err) = stream.write_all(&frame) {
+        if let Err(err) = stream.send(&frame, BRAIN_WRITE_TIMEOUT) {
             return GenesisResult::error(
                 GENESIS_ERROR_INTERNAL,
                 format!("brain task submit failed: {}", err).into_bytes(),
@@ -159,7 +165,7 @@ impl BrainPlugin {
                         return GenesisResult::ok(action.into_bytes());
                     }
                 }
-                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                Err(err) if err.kind == PlatformErrorKind::WouldBlock => {
                     return GenesisResult::thinking();
                 }
                 Err(err) => {
@@ -171,6 +177,35 @@ impl BrainPlugin {
                 }
             }
         }
+    }
+}
+
+fn connect_brain_stream() -> Result<Box<dyn IpcStream>, String> {
+    if let Ok(socket_path) = std::env::var(BRAIN_SOCKET_ENV) {
+        return connect_legacy_socket_path_with_timeout(&socket_path, BRAIN_CONNECT_TIMEOUT)
+            .map_err(|err| err.to_string());
+    }
+
+    let endpoint = IpcEndpoint::local_service(SERVICE_BRAIN).map_err(|err| err.to_string())?;
+    default_platform_adapter()
+        .connect_streaming_ipc_with_timeout(endpoint, BRAIN_CONNECT_TIMEOUT)
+        .map_err(|err| err.to_string())
+}
+
+fn default_platform_adapter() -> DesktopPlatformAdapter {
+    DesktopPlatformAdapter::legacy_runtime(genesis_platform::RuntimeProfile::DesktopSafe)
+}
+
+#[cfg(test)]
+fn default_brain_socket_path() -> Result<String, String> {
+    match default_platform_adapter()
+        .local_service_address(SERVICE_BRAIN)
+        .map_err(|err| err.message)?
+    {
+        LocalServiceAddress::UnixSocket(path) => Ok(path.to_string_lossy().into_owned()),
+        LocalServiceAddress::WindowsNamedPipe(pipe_name) => Ok(pipe_name),
+        LocalServiceAddress::LoopbackTcp { host, port } => Ok(format!("{host}:{port}")),
+        LocalServiceAddress::Unsupported => Err("brain service is unsupported locally".to_string()),
     }
 }
 
@@ -292,7 +327,7 @@ declare_genesis_plugin!(BrainPlugin, BrainPlugin::new);
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_cerebellum_action_data;
+    use super::{default_brain_socket_path, resolve_cerebellum_action_data};
     use serde_json::Value;
 
     #[test]
@@ -322,5 +357,15 @@ mod tests {
         assert_eq!(value["action"]["x"], 4.0);
         assert_eq!(value["action"]["y"], 6.0);
         assert_eq!(value["advisory_meta"]["hash"], "0123456789abcdef");
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn default_brain_socket_preserves_existing_daemon_filename() {
+        assert!(
+            default_brain_socket_path()
+                .unwrap()
+                .ends_with("genesis_brain.sock")
+        );
     }
 }

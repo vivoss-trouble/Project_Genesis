@@ -115,6 +115,7 @@ name = "brain-llm"
 version = "0.1.0"
 dependencies = [
  "genesis-contracts",
+ "genesis-platform",
  "serde",
  "serde_json",
 ]
@@ -530,6 +531,7 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 name = "fantasy-dummy"
 version = "0.1.0"
 dependencies = [
+ "genesis-platform",
  "serde",
  "serde_json",
 ]
@@ -688,13 +690,13 @@ name = "genesis-core"
 version = "0.1.0"
 dependencies = [
  "genesis-contracts",
+ "genesis-platform",
  "genesis-plugin-sdk",
  "genesis-wasm-plugin-runner",
  "libloading",
  "notify",
  "serde",
  "serde_json",
- "socket2",
  "wat",
 ]
 
@@ -702,6 +704,7 @@ dependencies = [
 name = "genesis-frame-grabber"
 version = "0.1.0"
 dependencies = [
+ "genesis-platform",
  "serde",
  "serde_json",
 ]
@@ -710,8 +713,17 @@ dependencies = [
 name = "genesis-os-driver"
 version = "0.1.0"
 dependencies = [
+ "genesis-platform",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "genesis-platform"
+version = "0.1.0"
+dependencies = [
+ "socket2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -728,9 +740,17 @@ name = "genesis-replay"
 version = "0.1.0"
 dependencies = [
  "genesis-contracts",
+ "genesis-platform",
  "libloading",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "genesis-sdk"
+version = "0.1.0"
+dependencies = [
+ "genesis-platform",
 ]
 
 [[package]]
@@ -1423,6 +1443,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 name = "llm-dummy"
 version = "0.1.0"
 dependencies = [
+ "genesis-platform",
  "serde",
  "serde_json",
 ]

@@ -16,7 +16,9 @@ GENESIS_N_GPU_LAYERS=-1 \
 python3 genesis-daemons/llm-daemon-python/llm_daemon.py
 ```
 
-The daemon listens on `/tmp/genesis_brain.sock` and returns newline-delimited JSON compatible with `brain-llm`.
+The daemon listens on `GENESIS_BRAIN_SOCKET` when set, otherwise
+`tempfile.gettempdir()/genesis_brain.sock`, and returns newline-delimited JSON
+compatible with `brain-llm`.
 
 The daemon includes a JSON purifier before sending actions back to Genesis:
 

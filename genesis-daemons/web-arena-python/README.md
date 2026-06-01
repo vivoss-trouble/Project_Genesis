@@ -56,10 +56,15 @@ GENESIS_WEB_OBSERVED_SELECTORS=a,body \
 Then send a Genesis action frame:
 
 ```bash
+GENESIS_ACT_SOCKET="${GENESIS_ACT_SOCKET:-$(python3 - <<'PY'
+import tempfile
+print(f"{tempfile.gettempdir()}/genesis_act.sock")
+PY
+)}"
 python3 - <<'PY'
-import json, socket
+import json, os, socket
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect('/tmp/genesis_act.sock')
+s.connect(os.environ["GENESIS_ACT_SOCKET"])
 s.sendall((json.dumps({
     "act": "click",
     "target": "a",

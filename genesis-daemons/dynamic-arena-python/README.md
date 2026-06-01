@@ -17,7 +17,7 @@ curl http://127.0.0.1:4781/state
 Actions are queued through:
 
 ```text
-/tmp/genesis_dynamic_act.sock
+GENESIS_DYNAMIC_ACT_SOCKET when set, otherwise tempfile.gettempdir()/genesis_dynamic_act.sock
 ```
 
 Supported action:

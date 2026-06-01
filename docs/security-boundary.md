@@ -8,11 +8,11 @@ This document describes the runtime isolation boundary that is implemented by th
 
 ### Trusted In-Process Genesis Plugins
 
-`genesis-core` loads `.so` / `.dylib` plugins through `libloading` and a C ABI entrypoint. These plugins run inside the `genesis-core` process.
+`genesis-core` loads `.so` / `.dylib` / `.dll` plugins through `libloading` and a C ABI entrypoint. These plugins run inside the `genesis-core` process.
 
 Runtime gate:
 
-- Native `.so` / `.dylib` loading is disabled by default.
+- Native `.so` / `.dylib` / `.dll` loading is disabled by default.
 - Native plugins require all three gates: `GENESIS_RUNTIME_PROFILE=development|dev|local|test`, `GENESIS_ALLOW_NATIVE_PLUGINS=1`, and `GENESIS_NATIVE_PLUGIN_TRUST=dev-only|trusted-dev`.
 - `GENESIS_RUNTIME_PROFILE=release|production`, an unset runtime profile, or a missing trust declaration keeps native loading disabled.
 - Set the native gates only when loading trusted local plugins for development or test work.

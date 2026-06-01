@@ -3,65 +3,45 @@ from __future__ import annotations
 import json
 import os
 import socket
-import socketserver
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from daemon_transport import BoundedThreadingMixIn, ClientThreadLimiter, read_line
+from daemon_transport import (
+    ClientThreadLimiter,
+    SERVICE_DYNAMIC_ACT,
+    bind_unix_stream_socket,
+    local_service_socket_path,
+    parse_int_env,
+    read_line,
+    serve_json_state,
+)
 from arena_engine import DynamicArenaEngine
 
 
 STATE_HOST = os.environ.get("GENESIS_DYNAMIC_ARENA_HOST", "127.0.0.1")
-STATE_PORT = int(os.environ.get("GENESIS_DYNAMIC_ARENA_PORT", "4781"))
+STATE_PORT = parse_int_env("GENESIS_DYNAMIC_ARENA_PORT", 4781, 1)
 ACTION_SOCKET_PATH = os.environ.get(
-    "GENESIS_DYNAMIC_ACT_SOCKET", "/tmp/genesis_dynamic_act.sock"
+    "GENESIS_DYNAMIC_ACT_SOCKET", local_service_socket_path(SERVICE_DYNAMIC_ACT)
 )
 CLIENT_THREADS = ClientThreadLimiter("dynamic-arena", connection_arg_index=1)
 
 
 def serve_state(engine: DynamicArenaEngine) -> None:
-    class ReusableThreadingTCPServer(BoundedThreadingMixIn, socketserver.TCPServer):
-        allow_reuse_address = True
-        transport_name = "dynamic-arena-state"
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802
-            if self.path != "/state":
-                self.send_response(404)
-                self.end_headers()
-                return
-
-            snapshot = engine.read_snapshot()
-            snapshot["transport"] = self.server.transport_health()
-            body = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, format: str, *args: Any) -> None:
-            return
-
-    with ReusableThreadingTCPServer((STATE_HOST, STATE_PORT), Handler) as httpd:
-        print(f"[dynamic-arena] state at http://{STATE_HOST}:{STATE_PORT}/state")
-        httpd.serve_forever()
+    serve_json_state(
+        STATE_HOST,
+        STATE_PORT,
+        label="dynamic-arena-state",
+        log_prefix="dynamic-arena",
+        snapshot_provider=engine.read_snapshot,
+    )
 
 
 def start_action_socket(engine: DynamicArenaEngine) -> None:
-    try:
-        Path(ACTION_SOCKET_PATH).unlink()
-    except FileNotFoundError:
-        pass
-
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(ACTION_SOCKET_PATH)
-    server.listen()
+    server = bind_unix_stream_socket(ACTION_SOCKET_PATH)
     print(f"[dynamic-arena] action socket at {ACTION_SOCKET_PATH}")
 
     def accept_loop() -> None:

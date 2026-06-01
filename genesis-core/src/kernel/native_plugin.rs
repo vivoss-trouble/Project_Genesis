@@ -1,26 +1,55 @@
+#[cfg(feature = "native-runtime")]
 use genesis_contracts::wire::{
     GENESIS_ABI_VERSION, GENESIS_STATUS_ERROR, GENESIS_STATUS_OK, GENESIS_STATUS_REJECTED,
     GENESIS_STATUS_TAINTED, GENESIS_STATUS_THINKING, GENESIS_STATUS_TIMEOUT, GenesisPluginApi,
     GenesisResponse, GenesisSlice,
 };
+#[cfg(feature = "native-runtime")]
 use libloading::{Library, Symbol};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
+#[cfg(feature = "native-runtime")]
+use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "native-runtime")]
 use crate::act::ActDispatcher;
 use crate::audit::{AuditEvent, AuditLogger};
+#[cfg(feature = "native-runtime")]
 use crate::watchdog::PluginWorker;
 
+use super::BrainDispatch;
+#[cfg(feature = "native-runtime")]
 use super::plugin_common::{fnv1a64, preview};
-use super::{BrainDispatch, PLUGIN_CALL_TIMEOUT, dispatch_brain_action};
+#[cfg(feature = "native-runtime")]
+use super::{PLUGIN_CALL_TIMEOUT, dispatch_brain_action};
 
 pub(super) struct LoadedPlugin {
     pub(super) path: String,
     pub(super) name: String,
+    #[cfg(feature = "native-runtime")]
     pub(super) worker: PluginWorker,
+    #[cfg(not(feature = "native-runtime"))]
+    pub(super) worker: DisabledPluginWorker,
+    #[cfg(feature = "native-runtime")]
     pub(super) _lib: Library,
     pub(super) retired_at: Option<Instant>,
 }
 
+#[cfg(not(feature = "native-runtime"))]
+pub(super) struct DisabledPluginWorker;
+
+#[cfg(not(feature = "native-runtime"))]
+impl DisabledPluginWorker {
+    pub(super) fn shutdown(&mut self) {}
+    pub(super) fn retire(&mut self) {}
+    pub(super) fn try_reap(&mut self) -> bool {
+        true
+    }
+    pub(super) fn is_shutdown_pending(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(feature = "native-runtime")]
 pub(super) fn load_native_plugin(path: &str) -> Result<LoadedPlugin, String> {
     unsafe {
         let lib = Library::new(path).map_err(|e| e.to_string())?;
@@ -54,6 +83,14 @@ pub(super) fn load_native_plugin(path: &str) -> Result<LoadedPlugin, String> {
     }
 }
 
+#[cfg(not(feature = "native-runtime"))]
+pub(super) fn load_native_plugin(path: &str) -> Result<LoadedPlugin, String> {
+    Err(format!(
+        "native plugin runtime is disabled for this build; cannot load plugin {path}"
+    ))
+}
+
+#[cfg(feature = "native-runtime")]
 pub(super) fn trigger_loaded_plugin(
     plugin: &mut LoadedPlugin,
     tick_id: u64,
@@ -136,6 +173,25 @@ pub(super) fn trigger_loaded_plugin(
     BrainDispatch::None
 }
 
+#[cfg(not(feature = "native-runtime"))]
+pub(super) fn trigger_loaded_plugin(
+    plugin: &mut LoadedPlugin,
+    tick_id: u64,
+    _payload: &str,
+    _act_dispatcher: &crate::act::ActDispatcher,
+    auditor: &AuditLogger,
+    _allow_plan_draft: bool,
+    _allow_action_dispatch: bool,
+) -> BrainDispatch {
+    auditor.log(AuditEvent::FailureObserved {
+        tick_id,
+        component: plugin.name.clone(),
+        error: "native plugin runtime is disabled for this build".to_string(),
+    });
+    BrainDispatch::None
+}
+
+#[cfg(feature = "native-runtime")]
 fn current_timestamp_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -143,6 +199,7 @@ fn current_timestamp_ms() -> u64 {
         .unwrap_or_default()
 }
 
+#[cfg(feature = "native-runtime")]
 fn slice_to_string(slice: GenesisSlice) -> String {
     if slice.ptr.is_null() || slice.len == 0 {
         return "<unnamed-plugin>".to_string();
@@ -152,6 +209,7 @@ fn slice_to_string(slice: GenesisSlice) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+#[cfg(feature = "native-runtime")]
 fn response_data_to_string(response: &GenesisResponse) -> String {
     if response.data.ptr.is_null() || response.data.len == 0 {
         return String::new();

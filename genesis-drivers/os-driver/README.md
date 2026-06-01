@@ -26,8 +26,10 @@ cargo run -p genesis-os-driver -- click --x 100 --y 100 --armed --confirm GENESI
 Armed mode requires macOS Accessibility permission for the terminal or Codex
 host process.
 
-The daemon listens on `/tmp/genesis_os_driver.sock` by default and speaks one
-JSON request per line:
+The daemon binds the canonical `genesis-os-driver` local service by default and
+speaks one JSON request per line. On macOS/Linux this currently maps to
+`<system temp dir>/genesis_os_driver.sock`. Pass `--socket` to pin a specific
+legacy path:
 
 ```json
 {"request_id":"probe-1","act":"probe"}

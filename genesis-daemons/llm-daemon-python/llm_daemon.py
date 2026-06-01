@@ -3,7 +3,7 @@
 Genesis real LLM daemon skeleton.
 
 Protocol:
-  - listens on /tmp/genesis_brain.sock
+  - listens on the genesis-brain local service socket
   - receives one newline-delimited JSON BrainRequest
   - returns one newline-delimited JSON BrainResponse
 
@@ -26,7 +26,14 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from daemon_transport import ClientThreadLimiter, read_line
+from daemon_transport import (
+    ClientThreadLimiter,
+    SERVICE_BRAIN,
+    local_service_socket_path,
+    parse_float_env,
+    parse_int_env,
+    read_line,
+)
 from llm_actions import (
     ActionPolicy,
     purify_action,
@@ -42,7 +49,7 @@ from llm_validation_models import (
 )
 
 
-SOCKET_PATH = "/tmp/genesis_brain.sock"
+SOCKET_PATH = os.environ.get("GENESIS_BRAIN_SOCKET", local_service_socket_path(SERVICE_BRAIN))
 ALLOWED_CLICK_TARGETS = set(
     item.strip()
     for item in os.environ.get("GENESIS_ALLOWED_CLICK_TARGETS", "#heal-btn").split(",")
@@ -134,9 +141,9 @@ def load_model() -> Any | None:
     print(f"[Brain] 正在点燃硅基灵魂: {model_path}")
     return Llama(
         model_path=model_path,
-        n_ctx=int(os.environ.get("GENESIS_N_CTX", "4096")),
-        n_gpu_layers=int(os.environ.get("GENESIS_N_GPU_LAYERS", "-1")),
-        n_threads=int(os.environ.get("GENESIS_N_THREADS", "8")),
+        n_ctx=parse_int_env("GENESIS_N_CTX", 4096, 1),
+        n_gpu_layers=parse_int_env("GENESIS_N_GPU_LAYERS", -1, -1),
+        n_threads=parse_int_env("GENESIS_N_THREADS", 8, 1),
         verbose=False,
     )
 
@@ -156,7 +163,7 @@ def handle_client(conn: socket.socket, model: Any | None) -> None:
         payload = envelope.payload
         task_id = envelope.task_id
         print(f"[llm-daemon] task={task_id} tick={request.get('tick_id')}")
-        time.sleep(float(os.environ.get("GENESIS_LLM_LATENCY_SEC", "0.2")))
+        time.sleep(parse_float_env("GENESIS_LLM_LATENCY_SEC", 0.2, 0.0))
         advisory, advisory_meta = read_memory_advisory(
             payload,
             ALLOWED_CLICK_TARGETS,

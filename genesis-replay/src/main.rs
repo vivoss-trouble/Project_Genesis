@@ -1,21 +1,25 @@
-use genesis_contracts::wire::{
-    GENESIS_ABI_VERSION, GenesisPayload, GenesisPluginApi, GenesisResponse, GenesisSlice,
+use genesis_contracts::wire::GenesisResponse;
+#[cfg(all(feature = "native-replay", any(unix, windows)))]
+use genesis_contracts::wire::GenesisSlice;
+#[cfg(all(feature = "native-replay", any(unix, windows)))]
+use genesis_contracts::wire::{GENESIS_ABI_VERSION, GenesisPayload, GenesisPluginApi};
+use genesis_platform::{
+    IpcEndpoint, PlatformAdapter, desktop::DesktopPlatformAdapter, ipc::SERVICE_WEB_ACT,
 };
+#[cfg(all(feature = "native-replay", any(unix, windows)))]
 use libloading::{Library, Symbol};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_AUDIT_PATH: &str = ".genesis-state/audit.jsonl";
 const DEFAULT_PLUGINS_DIR: &str = "genesis-plugins";
 const DEFAULT_SANDBOX_DIR: &str = ".genesis-state-replay";
 const DEFAULT_ANCHOR_STATE: &str = ".genesis-state/anchor.mmap";
-const ACTUATOR_SOCKET_PATH: &str = "/tmp/genesis_act.sock";
+const ACTUATOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const ACTUATOR_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy)]
 enum ReplayMode {
@@ -46,6 +50,10 @@ struct AuditRecord {
 #[derive(Debug, Clone)]
 struct SenseFrame {
     tick_id: u64,
+    #[cfg_attr(
+        not(all(feature = "native-replay", any(unix, windows))),
+        allow(dead_code)
+    )]
     timestamp_ms: u64,
     state_json: String,
 }
@@ -57,9 +65,15 @@ struct ExpectedPluginResponse {
     data_hash: Option<u64>,
 }
 
+#[cfg(all(feature = "native-replay", any(unix, windows)))]
 struct LoadedReplayPlugin {
     _lib: Library,
     api: GenesisPluginApi,
+    name: String,
+}
+
+#[cfg(not(all(feature = "native-replay", any(unix, windows))))]
+struct LoadedReplayPlugin {
     name: String,
 }
 
@@ -72,7 +86,8 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let config = parse_args()?;
-    let records = read_audit(&config.audit_path)?;
+    let platform = replay_platform_adapter();
+    let records = read_audit(&config.audit_path, &platform)?;
 
     match config.mode {
         ReplayMode::Strict => strict_audit(&records),
@@ -254,12 +269,16 @@ fn simulate(config: &Config, records: &[AuditRecord]) -> Result<(), String> {
         return Err("audit log has no SenseCaptured events".to_string());
     }
 
-    let project_root = std::env::current_dir().map_err(|err| err.to_string())?;
+    let platform = replay_platform_adapter();
+    let project_root = platform.current_dir().map_err(|err| err.to_string())?;
     let anchor_snapshot = find_replay_snapshot(records, "anchor-mmap");
-    let sandbox_root = prepare_sandbox(config, &project_root, anchor_snapshot.as_deref())?;
-    let plugin_paths = plugin_paths(&config.plugins_dir, &project_root)?;
+    let sandbox_root =
+        prepare_sandbox(config, &project_root, anchor_snapshot.as_deref(), &platform)?;
+    let plugin_paths = plugin_paths(&config.plugins_dir, &project_root, &platform)?;
 
-    std::env::set_current_dir(&sandbox_root).map_err(|err| err.to_string())?;
+    platform
+        .set_current_dir(&sandbox_root)
+        .map_err(|err| err.to_string())?;
     let plugins = load_plugins(&plugin_paths, config.include_brain)?;
 
     println!(
@@ -280,7 +299,7 @@ fn simulate(config: &Config, records: &[AuditRecord]) -> Result<(), String> {
             let error_code = response.error_code;
             let data = response_to_string(&response);
             let data_hash = fnv1a64(data.as_bytes());
-            (plugin.api.free_response)(response);
+            free_plugin_response(plugin, response);
 
             let key = (frame.tick_id, plugin.name.clone());
             let verdict = match expected.get(&key) {
@@ -435,6 +454,7 @@ fn collect_expected_plugin_responses(
     expected
 }
 
+#[cfg(all(feature = "native-replay", any(unix, windows)))]
 fn load_plugins(
     plugin_paths: &[PathBuf],
     include_brain: bool,
@@ -474,6 +494,15 @@ fn load_plugins(
     Ok(plugins)
 }
 
+#[cfg(not(all(feature = "native-replay", any(unix, windows))))]
+fn load_plugins(
+    _plugin_paths: &[PathBuf],
+    _include_brain: bool,
+) -> Result<Vec<LoadedReplayPlugin>, String> {
+    Err("genesis-replay dynamic plugin loading is not supported on this target".to_string())
+}
+
+#[cfg(all(feature = "native-replay", any(unix, windows)))]
 fn invoke_plugin(plugin: &LoadedReplayPlugin, frame: &SenseFrame) -> GenesisResponse {
     let bytes = frame.state_json.as_bytes();
     let payload = GenesisPayload {
@@ -486,27 +515,47 @@ fn invoke_plugin(plugin: &LoadedReplayPlugin, frame: &SenseFrame) -> GenesisResp
     (plugin.api.on_event)(payload)
 }
 
+#[cfg(not(all(feature = "native-replay", any(unix, windows))))]
+fn invoke_plugin(_plugin: &LoadedReplayPlugin, _frame: &SenseFrame) -> GenesisResponse {
+    unreachable!("load_plugins fails on targets without dynamic library loading")
+}
+
+#[cfg(all(feature = "native-replay", any(unix, windows)))]
+fn free_plugin_response(plugin: &LoadedReplayPlugin, response: GenesisResponse) {
+    (plugin.api.free_response)(response);
+}
+
+#[cfg(not(all(feature = "native-replay", any(unix, windows))))]
+fn free_plugin_response(_plugin: &LoadedReplayPlugin, _response: GenesisResponse) {
+    unreachable!("load_plugins fails on targets without dynamic library loading")
+}
+
 fn prepare_sandbox(
     config: &Config,
     project_root: &Path,
     anchor_snapshot: Option<&str>,
+    platform: &DesktopPlatformAdapter,
 ) -> Result<PathBuf, String> {
     let sandbox_base = absolutize(&config.sandbox_dir, project_root);
     let sandbox_root = sandbox_base.join(format!("session-{}", current_ts()));
     let sandbox_state = sandbox_root.join(".genesis-state");
-    fs::create_dir_all(&sandbox_state).map_err(|err| err.to_string())?;
+    platform
+        .ensure_private_dir(&sandbox_state)
+        .map_err(|err| err.to_string())?;
 
     let source_anchor = anchor_snapshot
         .map(PathBuf::from)
         .map(|path| absolutize(&path, project_root))
         .unwrap_or_else(|| absolutize(&config.anchor_state, project_root));
     if source_anchor.exists() {
-        fs::copy(&source_anchor, sandbox_state.join("anchor.mmap")).map_err(|err| {
-            format!(
-                "failed to copy anchor state {} into sandbox: {err}",
-                source_anchor.display()
-            )
-        })?;
+        platform
+            .copy_file(&source_anchor, &sandbox_state.join("anchor.mmap"))
+            .map_err(|err| {
+                format!(
+                    "failed to copy anchor state {} into sandbox: {err}",
+                    source_anchor.display()
+                )
+            })?;
     }
 
     Ok(sandbox_root)
@@ -525,12 +574,16 @@ fn find_replay_snapshot(records: &[AuditRecord], label: &str) -> Option<String> 
         })
 }
 
-fn plugin_paths(plugins_dir: &Path, project_root: &Path) -> Result<Vec<PathBuf>, String> {
+fn plugin_paths(
+    plugins_dir: &Path,
+    project_root: &Path,
+    platform: &DesktopPlatformAdapter,
+) -> Result<Vec<PathBuf>, String> {
     let plugins_dir = absolutize(plugins_dir, project_root);
-    let mut paths = fs::read_dir(&plugins_dir)
+    let mut paths = platform
+        .read_dir_paths(&plugins_dir)
         .map_err(|err| format!("failed to read {}: {err}", plugins_dir.display()))?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
+        .into_iter()
         .filter(|path| {
             path.extension()
                 .and_then(|ext| ext.to_str())
@@ -541,17 +594,18 @@ fn plugin_paths(plugins_dir: &Path, project_root: &Path) -> Result<Vec<PathBuf>,
     Ok(paths)
 }
 
-fn read_audit(path: &Path) -> Result<Vec<AuditRecord>, String> {
-    let file = File::open(path).map_err(|err| format!("{}: {err}", path.display()))?;
-    let reader = BufReader::new(file);
+fn read_audit(path: &Path, platform: &DesktopPlatformAdapter) -> Result<Vec<AuditRecord>, String> {
+    let bytes = platform
+        .read_file(path)
+        .map_err(|err| format!("{}: {err}", path.display()))?;
+    let text = String::from_utf8(bytes).map_err(|err| format!("{}: {err}", path.display()))?;
     let mut records = Vec::new();
 
-    for (idx, line) in reader.lines().enumerate() {
-        let line = line.map_err(|err| err.to_string())?;
+    for (idx, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        let record = serde_json::from_str::<AuditRecord>(&line)
+        let record = serde_json::from_str::<AuditRecord>(line)
             .map_err(|err| format!("{}:{}: {err}", path.display(), idx + 1))?;
         records.push(record);
     }
@@ -684,10 +738,20 @@ fn action_only_json(action_json: &str) -> Result<Value, String> {
 }
 
 fn emit_to_actuator(action: &Value) -> Result<(), String> {
-    let mut stream = UnixStream::connect(ACTUATOR_SOCKET_PATH).map_err(|err| err.to_string())?;
     let mut frame = serde_json::to_vec(action).map_err(|err| err.to_string())?;
     frame.push(b'\n');
-    stream.write_all(&frame).map_err(|err| err.to_string())
+
+    let endpoint = IpcEndpoint::local_service(SERVICE_WEB_ACT).map_err(|err| err.to_string())?;
+    let mut client = replay_platform_adapter()
+        .connect_ipc_with_timeout(endpoint, ACTUATOR_CONNECT_TIMEOUT)
+        .map_err(|err| err.to_string())?;
+    client
+        .send(&frame, ACTUATOR_WRITE_TIMEOUT)
+        .map_err(|err| err.to_string())
+}
+
+fn replay_platform_adapter() -> DesktopPlatformAdapter {
+    DesktopPlatformAdapter::legacy_runtime(genesis_platform::RuntimeProfile::DesktopSafe)
 }
 
 fn response_to_string(response: &GenesisResponse) -> String {
@@ -698,6 +762,7 @@ fn response_to_string(response: &GenesisResponse) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+#[cfg(all(feature = "native-replay", any(unix, windows)))]
 fn slice_to_string(slice: GenesisSlice) -> String {
     if slice.ptr.is_null() || slice.len == 0 {
         return "<unnamed-plugin>".to_string();

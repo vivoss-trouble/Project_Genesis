@@ -8,7 +8,7 @@ genesis-plugin-sdk = { path = "../genesis-plugin-sdk" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
-wasmtime = "26"
+wasmtime = { version = "26", default-features = false, features = ["cranelift", "runtime", "std"] }
 
 [dev-dependencies]
 wat = "1.0"

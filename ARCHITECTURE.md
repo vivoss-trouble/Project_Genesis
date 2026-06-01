@@ -32,7 +32,7 @@ Anchor 插件使用 Ping-Pong `mmap` 状态锚点。状态文件被划分为两�
 
 大模型运行在独立 OS daemon 中，通过 Unix Domain Socket 与 `brain-llm` 插件通信。插件只负责投递任务和非阻塞轮询结果，返回 `THINKING` 或 `OK`。模型加载、推理、崩溃、重启，都不能污染微核主进程。
 
-真实网页同样必须被关进气闸。`web-arena-python` 把浏览器、DOM 漂移、异步加载和点击执行隔离在独立 daemon 中。核心只从 `GENESIS_SENSE_URL` 读取缓存后的 `web_state`，动作仍通过 `/tmp/genesis_act.sock` 投递。默认状态下 Web Arena 只观察不点击；点击必须同时通过 Web Arena selector allowlist 和 LLM daemon target allowlist。
+真实网页同样必须被关进气闸。`web-arena-python` 把浏览器、DOM 漂移、异步加载和点击执行隔离在独立 daemon 中。核心只从 `GENESIS_SENSE_URL` 读取缓存后的 `web_state`，动作通过平台 runtime dir 下的 `genesis_act.sock` 投递；部署可用 `GENESIS_ACT_SOCKET` 显式覆盖。默认状态下 Web Arena 只观察不点击；点击必须同时通过 Web Arena selector allowlist 和 LLM daemon target allowlist。
 
 Web Arena 的 UDS 接收线程只负责把动作放入有界队列；所有 Playwright DOM 读写都在单一 browser worker 中串行执行。真实网页加载过程中的超时只会记录到 `last_error`，不会杀死监听线程，也不会阻塞微核心跳。
 

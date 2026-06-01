@@ -3,8 +3,13 @@ name = "genesis-replay"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["native-replay"]
+native-replay = ["dep:libloading"]
+
 [dependencies]
 genesis-contracts = { path = "../genesis-contracts" }
-libloading = "0.8"
+genesis-platform = { path = "../genesis-platform" }
+libloading = { version = "0.8", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

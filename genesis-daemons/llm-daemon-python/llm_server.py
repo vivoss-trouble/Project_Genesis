@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import os
 import socket
 from typing import Any, Callable
 
-from daemon_transport import ClientThreadLimiter
+from daemon_transport import ClientThreadLimiter, bind_unix_stream_socket
 
 
 ClientHandler = Callable[[socket.socket, Any | None], None]
@@ -16,14 +15,7 @@ def serve_unix_socket(
     client_threads: ClientThreadLimiter,
     handle_client: ClientHandler,
 ) -> None:
-    try:
-        os.unlink(socket_path)
-    except FileNotFoundError:
-        pass
-
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(socket_path)
-    server.listen()
+    server = bind_unix_stream_socket(socket_path)
     print(f"[llm-daemon] listening on {socket_path}")
 
     while True:

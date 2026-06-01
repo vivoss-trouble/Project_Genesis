@@ -1,26 +1,34 @@
+#[cfg(feature = "wasm-runtime")]
 use genesis_contracts::wire::{GENESIS_STATUS_ERROR, GENESIS_STATUS_OK};
+#[cfg(feature = "wasm-runtime")]
 use genesis_plugin_sdk::{PluginRequest, PluginStatus};
+#[cfg(feature = "wasm-runtime")]
 use genesis_wasm_plugin_runner::{
     LinearMemoryTransport, PluginError as WasmPluginError, WasmPluginLimits, WasmPluginTransport,
 };
-use std::fs;
+#[cfg(feature = "wasm-runtime")]
 use std::time::Instant;
 
 use crate::audit::{AuditEvent, AuditLogger};
 
+#[cfg(feature = "wasm-runtime")]
 use super::plugin_common::{fnv1a64, preview};
 
 pub(super) struct LoadedWasmPlugin {
     pub(super) name: String,
+    #[cfg(feature = "wasm-runtime")]
     transport: LinearMemoryTransport,
 }
 
-pub(super) fn load_wasm_plugin_from_path(path: &str) -> Result<LoadedWasmPlugin, String> {
-    let wasm_bytes = fs::read(path).map_err(|error| error.to_string())?;
+#[cfg(feature = "wasm-runtime")]
+pub(super) fn load_wasm_plugin_from_bytes(
+    path: &str,
+    wasm_bytes: &[u8],
+) -> Result<LoadedWasmPlugin, String> {
     let name = wasm_plugin_name_from_path(path);
     let transport = LinearMemoryTransport::from_bytes(
         name.clone(),
-        &wasm_bytes,
+        wasm_bytes,
         WasmPluginLimits {
             max_input_bytes: 64 * 1024,
             max_output_bytes: 64 * 1024,
@@ -33,6 +41,18 @@ pub(super) fn load_wasm_plugin_from_path(path: &str) -> Result<LoadedWasmPlugin,
     Ok(LoadedWasmPlugin { name, transport })
 }
 
+#[cfg(not(feature = "wasm-runtime"))]
+pub(super) fn load_wasm_plugin_from_bytes(
+    path: &str,
+    _wasm_bytes: &[u8],
+) -> Result<LoadedWasmPlugin, String> {
+    let name = wasm_plugin_name_from_path(path);
+    Err(format!(
+        "wasm runtime is disabled for this build; cannot load plugin {name}"
+    ))
+}
+
+#[cfg(feature = "wasm-runtime")]
 pub(super) fn trigger_loaded_wasm_plugin(
     plugin: &LoadedWasmPlugin,
     tick_id: u64,
@@ -109,6 +129,20 @@ pub(super) fn trigger_loaded_wasm_plugin(
     }
 }
 
+#[cfg(not(feature = "wasm-runtime"))]
+pub(super) fn trigger_loaded_wasm_plugin(
+    plugin: &LoadedWasmPlugin,
+    tick_id: u64,
+    _payload: &str,
+    auditor: &AuditLogger,
+) {
+    auditor.log(AuditEvent::FailureObserved {
+        tick_id,
+        component: plugin.name.clone(),
+        error: "wasm runtime is disabled for this build".to_string(),
+    });
+}
+
 fn wasm_plugin_name_from_path(path: &str) -> String {
     std::path::Path::new(path)
         .file_stem()
@@ -117,6 +151,7 @@ fn wasm_plugin_name_from_path(path: &str) -> String {
         .unwrap_or_else(|| "wasm-plugin".to_string())
 }
 
+#[cfg(feature = "wasm-runtime")]
 fn wasm_plugin_error_detail(error: &WasmPluginError) -> String {
     match error {
         WasmPluginError::FatalPluginCrash(audit) => format!(

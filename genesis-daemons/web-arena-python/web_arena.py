@@ -4,7 +4,7 @@ Genesis Real Web Arena.
 
 This daemon is a browser airlock:
   - exposes GET /state for genesis-core Sense
-  - listens on /tmp/genesis_act.sock for GenesisAction JSON
+  - listens on the canonical Genesis web action socket for GenesisAction JSON
   - opens only an allowlisted URL
   - executes only allowlisted selectors
 
@@ -20,19 +20,26 @@ import os
 import queue
 import re
 import socket
-import socketserver
 import sys
 import threading
 import time
 import urllib.parse
 import urllib.request
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from daemon_transport import BoundedThreadingMixIn, ClientThreadLimiter, read_line
+from daemon_transport import (
+    ClientThreadLimiter,
+    SERVICE_WEB_ACT,
+    bind_unix_stream_socket,
+    local_service_socket_path,
+    parse_float_env,
+    parse_int_env,
+    read_line,
+    serve_json_state,
+)
 
 
 def origin_of(url: str) -> str:
@@ -47,9 +54,11 @@ def csv_env(key: str, default: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-ACT_SOCKET_PATH = os.environ.get("GENESIS_ACT_SOCKET", "/tmp/genesis_act.sock")
+ACT_SOCKET_PATH = os.environ.get(
+    "GENESIS_ACT_SOCKET", local_service_socket_path(SERVICE_WEB_ACT)
+)
 STATE_HOST = os.environ.get("GENESIS_WEB_ARENA_HOST", "127.0.0.1")
-STATE_PORT = int(os.environ.get("GENESIS_WEB_ARENA_PORT", "4777"))
+STATE_PORT = parse_int_env("GENESIS_WEB_ARENA_PORT", 4777, 1)
 TARGET_URL = os.environ.get("GENESIS_WEB_URL", "https://example.com")
 ALLOWED_ORIGINS = set(csv_env("GENESIS_WEB_ALLOWED_ORIGINS", origin_of(TARGET_URL)))
 OBSERVED_SELECTORS = set(
@@ -58,11 +67,11 @@ OBSERVED_SELECTORS = set(
 ALLOWED_CLICK_SELECTORS = set(csv_env("GENESIS_WEB_ALLOWED_SELECTORS", ""))
 HEADLESS = os.environ.get("GENESIS_WEB_HEADLESS", "1") != "0"
 FORCE_READ_ONLY = os.environ.get("GENESIS_WEB_FORCE_READ_ONLY", "0") == "1"
-STATE_TIMEOUT_MS = int(os.environ.get("GENESIS_WEB_STATE_TIMEOUT_MS", "300"))
-ACTION_TIMEOUT_MS = int(os.environ.get("GENESIS_WEB_ACTION_TIMEOUT_MS", "3000"))
+STATE_TIMEOUT_MS = parse_int_env("GENESIS_WEB_STATE_TIMEOUT_MS", 300, 1)
+ACTION_TIMEOUT_MS = parse_int_env("GENESIS_WEB_ACTION_TIMEOUT_MS", 3000, 1)
 MAX_WAIT_MS = 2_000
-REFRESH_INTERVAL_SEC = float(os.environ.get("GENESIS_WEB_REFRESH_SEC", "1.0"))
-ACTION_QUEUE_SIZE = int(os.environ.get("GENESIS_WEB_ACTION_QUEUE", "32"))
+REFRESH_INTERVAL_SEC = parse_float_env("GENESIS_WEB_REFRESH_SEC", 1.0, 0.001)
+ACTION_QUEUE_SIZE = parse_int_env("GENESIS_WEB_ACTION_QUEUE", 32, 1)
 CLIENT_THREADS = ClientThreadLimiter("web-arena", connection_arg_index=1)
 
 
@@ -142,14 +151,7 @@ def start_browser_or_probe(state: ArenaState) -> None:
 
 
 def start_act_socket(state: ArenaState) -> None:
-    try:
-        Path(ACT_SOCKET_PATH).unlink()
-    except FileNotFoundError:
-        pass
-
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(ACT_SOCKET_PATH)
-    server.listen()
+    server = bind_unix_stream_socket(ACT_SOCKET_PATH)
     print(f"[web-arena] action socket listening on {ACT_SOCKET_PATH}")
 
     def accept_loop() -> None:
@@ -161,32 +163,13 @@ def start_act_socket(state: ArenaState) -> None:
 
 
 def serve_state(state: ArenaState) -> None:
-    class ReusableThreadingTCPServer(BoundedThreadingMixIn, socketserver.TCPServer):
-        allow_reuse_address = True
-        transport_name = "web-arena-state"
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802
-            if self.path != "/state":
-                self.send_response(404)
-                self.end_headers()
-                return
-
-            snapshot = state.snapshot()
-            snapshot["transport"] = self.server.transport_health()
-            body = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, format: str, *args: Any) -> None:
-            return
-
-    with ReusableThreadingTCPServer((STATE_HOST, STATE_PORT), Handler) as httpd:
-        print(f"[web-arena] state available at http://{STATE_HOST}:{STATE_PORT}/state")
-        httpd.serve_forever()
+    serve_json_state(
+        STATE_HOST,
+        STATE_PORT,
+        label="web-arena-state",
+        log_prefix="web-arena",
+        snapshot_provider=state.snapshot,
+    )
 
 
 def start_refresh_loop(state: ArenaState) -> None:
