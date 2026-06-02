@@ -195,7 +195,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p preflight-external-evidence
-          find downloaded-preflight-external-evidence -path '*/preflight-external-evidence/*.json' -exec cp {} preflight-external-evidence/ \;
+          find downloaded-preflight-external-evidence -type f -name '*.json' -exec cp {} preflight-external-evidence/ \;
           find preflight-external-evidence -type f -name '*.json' -print | sort
       - name: Validate preflight evidence
         shell: bash
