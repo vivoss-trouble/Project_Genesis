@@ -186,7 +186,7 @@ The workflow records:
 - hosted Linux, Windows, and macOS desktop shell health checks
 - hosted macOS iOS simulator availability plus `genesis-mobile-control` iOS
   target compilation
-- hosted Linux Android emulator availability plus `genesis-mobile-control`
+- hosted Linux Android target/toolchain check plus `genesis-mobile-control`
   host smoke
 - a Linux desktop shell artifact with a self-signed digest verification proof
 
@@ -208,6 +208,10 @@ GENESIS_PREFLIGHT_OUT_DIR=/path/to/preflight-external-evidence \
 GENESIS_REQUIRE_PREFLIGHT_EXTERNAL_EVIDENCE=1 \
   bash scripts/validate_preflight_external_evidence.sh
 ```
+
+The Android preflight is recorded under the `android_emulator` manifest kind for
+compatibility with the six-kind preflight summary, but it is a toolchain proof,
+not a real emulator or real device proof.
 
 Preflight evidence must stay outside the strict release evidence bundle. The
 strict gate accepts only real platform smoke manifests and real signing

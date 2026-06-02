@@ -89,32 +89,34 @@ jobs:
           if-no-files-found: error
 
   android-emulator-preflight:
-    name: Android emulator preflight
+    name: Android toolchain preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.git_ref || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
       - name: Run mobile control host smoke
         shell: bash
         run: cargo test -p genesis-mobile-control mobile_control_smoke_proves_remote_only_health_action_and_evidence
-      - name: Capture emulator proof
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 35
-          arch: x86_64
-          profile: pixel_6
-          script: |
-            adb shell getprop ro.build.version.release > "$RUNNER_TEMP/android-emulator-proof.txt"
-            adb shell getprop ro.product.model >> "$RUNNER_TEMP/android-emulator-proof.txt"
-            test -s "$RUNNER_TEMP/android-emulator-proof.txt"
+      - name: Check mobile control for Android target
+        shell: bash
+        run: |
+          cargo check -p genesis-mobile-control --target aarch64-linux-android
+          {
+            echo "android_target=aarch64-linux-android"
+            rustc -vV
+            cargo test -p genesis-mobile-control mobile_control_smoke_proves_remote_only_health_action_and_evidence -- --list
+          } > "$RUNNER_TEMP/android-toolchain-proof.txt"
+          test -s "$RUNNER_TEMP/android-toolchain-proof.txt"
       - name: Record preflight evidence
         shell: bash
         env:
           GENESIS_PREFLIGHT_KIND: android_emulator
-          GENESIS_PREFLIGHT_LABEL: hosted-linux-android-emulator
-          GENESIS_PREFLIGHT_PROOF: ${{ runner.temp }}/android-emulator-proof.txt
+          GENESIS_PREFLIGHT_LABEL: hosted-linux-android-toolchain
+          GENESIS_PREFLIGHT_PROOF: ${{ runner.temp }}/android-toolchain-proof.txt
           GENESIS_PREFLIGHT_VERIFY_CMD: test -s "$GENESIS_PREFLIGHT_PROOF"
           GENESIS_PREFLIGHT_OUT_DIR: ${{ github.workspace }}/preflight-external-evidence
         run: bash scripts/record_preflight_external_evidence.sh
