@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - master
+      - ci-bridge-test
 
 jobs:
   rust-python:

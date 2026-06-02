@@ -1,6 +1,9 @@
 name: Preflight External Evidence
 
 on:
+  push:
+    branches:
+      - ci-bridge-test
   workflow_dispatch:
     inputs:
       git_ref:
