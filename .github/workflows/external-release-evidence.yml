@@ -1,0 +1,266 @@
+name: External Release Evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref to verify, such as genesis-rc-2 or a commit SHA."
+        required: true
+        default: "genesis-rc-2"
+      run_desktop_smoke:
+        description: "Run macOS, Linux, and Windows desktop platform smoke."
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      run_ios_smoke:
+        description: "Run iOS smoke on a self-hosted runner with a real device."
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      run_android_smoke:
+        description: "Run Android smoke on a self-hosted runner with a real device."
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      run_signing_evidence:
+        description: "Record release signing evidence on self-hosted signing runners."
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      run_strict_gate:
+        description: "Import all evidence and run the strict release gate."
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+jobs:
+  desktop-smoke:
+    name: Desktop smoke (${{ matrix.platform }})
+    if: ${{ inputs.run_desktop_smoke == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-latest
+          - platform: windows
+            runner: windows-latest
+          - platform: macos
+            runner: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Record platform smoke
+        shell: bash
+        env:
+          GENESIS_PLATFORM_ID: ${{ matrix.platform }}
+          GENESIS_PLATFORM_SMOKE_DIR: ${{ github.workspace }}/external-release-evidence/platform-smoke
+        run: bash scripts/record_platform_smoke.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: external-release-evidence-platform-${{ matrix.platform }}
+          path: external-release-evidence
+          if-no-files-found: error
+
+  ios-smoke:
+    name: iOS device smoke
+    if: ${{ inputs.run_ios_smoke == 'true' }}
+    runs-on: [self-hosted, macOS, ios-device]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Capture iOS device proof
+        shell: bash
+        env:
+          GENESIS_IOS_DEVICE_PROOF_CMD: ${{ vars.GENESIS_IOS_DEVICE_PROOF_CMD }}
+        run: |
+          proof_cmd="${GENESIS_IOS_DEVICE_PROOF_CMD:-xcrun xctrace list devices}"
+          bash -lc "$proof_cmd" > "$RUNNER_TEMP/ios-device-proof.txt"
+          test -s "$RUNNER_TEMP/ios-device-proof.txt"
+      - name: Record iOS mobile smoke
+        shell: bash
+        env:
+          GENESIS_MOBILE_PLATFORM_ID: ios
+          GENESIS_MOBILE_DEVICE_ID: ${{ secrets.GENESIS_IOS_DEVICE_ID }}
+          GENESIS_MOBILE_OS_VERSION: ${{ vars.GENESIS_IOS_OS_VERSION }}
+          GENESIS_MOBILE_DEVICE_PROOF: ${{ runner.temp }}/ios-device-proof.txt
+          GENESIS_MOBILE_DEVICE_VERIFY_CMD: ${{ vars.GENESIS_IOS_DEVICE_VERIFY_CMD || 'test -s "$GENESIS_MOBILE_DEVICE_PROOF"' }}
+          GENESIS_MOBILE_REMOTE_BASE_URL: ${{ vars.GENESIS_MOBILE_REMOTE_BASE_URL || 'https://genesis-node.invalid' }}
+          GENESIS_PLATFORM_SMOKE_DIR: ${{ github.workspace }}/external-release-evidence/platform-smoke
+        run: |
+          test -n "$GENESIS_MOBILE_DEVICE_ID" || { echo "GENESIS_IOS_DEVICE_ID secret is required" >&2; exit 2; }
+          test -n "$GENESIS_MOBILE_OS_VERSION" || { echo "GENESIS_IOS_OS_VERSION variable is required" >&2; exit 2; }
+          bash scripts/record_mobile_control_smoke.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: external-release-evidence-platform-ios
+          path: external-release-evidence
+          if-no-files-found: error
+
+  android-smoke:
+    name: Android device smoke
+    if: ${{ inputs.run_android_smoke == 'true' }}
+    runs-on: [self-hosted, Linux, android-device]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Capture Android device proof
+        shell: bash
+        env:
+          GENESIS_ANDROID_DEVICE_PROOF_CMD: ${{ vars.GENESIS_ANDROID_DEVICE_PROOF_CMD }}
+        run: |
+          proof_cmd="${GENESIS_ANDROID_DEVICE_PROOF_CMD:-adb devices -l}"
+          bash -lc "$proof_cmd" > "$RUNNER_TEMP/android-device-proof.txt"
+          test -s "$RUNNER_TEMP/android-device-proof.txt"
+      - name: Record Android mobile smoke
+        shell: bash
+        env:
+          GENESIS_MOBILE_PLATFORM_ID: android
+          GENESIS_MOBILE_DEVICE_ID: ${{ secrets.GENESIS_ANDROID_DEVICE_ID }}
+          GENESIS_MOBILE_OS_VERSION: ${{ vars.GENESIS_ANDROID_OS_VERSION }}
+          GENESIS_MOBILE_DEVICE_PROOF: ${{ runner.temp }}/android-device-proof.txt
+          GENESIS_MOBILE_DEVICE_VERIFY_CMD: ${{ vars.GENESIS_ANDROID_DEVICE_VERIFY_CMD || 'test -s "$GENESIS_MOBILE_DEVICE_PROOF"' }}
+          GENESIS_MOBILE_REMOTE_BASE_URL: ${{ vars.GENESIS_MOBILE_REMOTE_BASE_URL || 'https://genesis-node.invalid' }}
+          GENESIS_PLATFORM_SMOKE_DIR: ${{ github.workspace }}/external-release-evidence/platform-smoke
+        run: |
+          test -n "$GENESIS_MOBILE_DEVICE_ID" || { echo "GENESIS_ANDROID_DEVICE_ID secret is required" >&2; exit 2; }
+          test -n "$GENESIS_MOBILE_OS_VERSION" || { echo "GENESIS_ANDROID_OS_VERSION variable is required" >&2; exit 2; }
+          bash scripts/record_mobile_control_smoke.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: external-release-evidence-platform-android
+          path: external-release-evidence
+          if-no-files-found: error
+
+  signing-evidence:
+    name: Signing evidence (${{ matrix.kind }})
+    if: ${{ inputs.run_signing_evidence == 'true' }}
+    runs-on: [self-hosted, release-signing]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kind: desktop_installer
+            artifact_secret: GENESIS_DESKTOP_INSTALLER_ARTIFACT
+            verify_secret: GENESIS_DESKTOP_INSTALLER_VERIFY_CMD
+          - kind: desktop_signing
+            artifact_secret: GENESIS_DESKTOP_SIGNING_ARTIFACT
+            verify_secret: GENESIS_DESKTOP_SIGNING_VERIFY_CMD
+          - kind: desktop_notarization
+            artifact_secret: GENESIS_DESKTOP_NOTARIZATION_ARTIFACT
+            verify_secret: GENESIS_DESKTOP_NOTARIZATION_VERIFY_CMD
+          - kind: ios_development_signing
+            artifact_secret: GENESIS_IOS_DEVELOPMENT_SIGNING_ARTIFACT
+            verify_secret: GENESIS_IOS_DEVELOPMENT_SIGNING_VERIFY_CMD
+          - kind: android_development_signing
+            artifact_secret: GENESIS_ANDROID_DEVELOPMENT_SIGNING_ARTIFACT
+            verify_secret: GENESIS_ANDROID_DEVELOPMENT_SIGNING_VERIFY_CMD
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref }}
+      - name: Record signing evidence
+        shell: bash
+        env:
+          GENESIS_RELEASE_SIGNING_KIND: ${{ matrix.kind }}
+          GENESIS_RELEASE_SIGNING_ARTIFACT: ${{ secrets[matrix.artifact_secret] }}
+          GENESIS_RELEASE_SIGNING_VERIFY_CMD: ${{ secrets[matrix.verify_secret] }}
+          GENESIS_RELEASE_SIGNING_LABEL: ${{ matrix.kind }}
+          GENESIS_RELEASE_SIGNING_DIR: ${{ github.workspace }}/external-release-evidence/release-signing
+        run: |
+          test -n "$GENESIS_RELEASE_SIGNING_ARTIFACT" || { echo "${{ matrix.artifact_secret }} secret is required" >&2; exit 2; }
+          test -n "$GENESIS_RELEASE_SIGNING_VERIFY_CMD" || { echo "${{ matrix.verify_secret }} secret is required" >&2; exit 2; }
+          bash scripts/record_release_signing_evidence.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: external-release-evidence-signing-${{ matrix.kind }}
+          path: external-release-evidence
+          if-no-files-found: error
+
+  strict-release-gate:
+    name: Strict release gate with external evidence
+    if: ${{ always() && inputs.run_strict_gate == 'true' }}
+    needs:
+      - desktop-smoke
+      - ios-smoke
+      - android-smoke
+      - signing-evidence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: external-release-evidence-*
+          path: downloaded-external-release-evidence
+      - name: Build evidence bundle
+        shell: bash
+        run: |
+          mkdir -p external-release-evidence-bundle/platform-smoke
+          mkdir -p external-release-evidence-bundle/release-signing
+          find downloaded-external-release-evidence -path '*/platform-smoke/*.json' -exec cp {} external-release-evidence-bundle/platform-smoke/ \;
+          find downloaded-external-release-evidence -path '*/release-signing/*.json' -exec cp {} external-release-evidence-bundle/release-signing/ \;
+          find external-release-evidence-bundle -type f -name '*.json' -print | sort
+      - name: Import external evidence
+        shell: bash
+        env:
+          GENESIS_EXTERNAL_EVIDENCE_BUNDLE: ${{ github.workspace }}/external-release-evidence-bundle
+          GENESIS_AUTONOMOUS_EVIDENCE_DIR: ${{ github.workspace }}/.genesis-state/autonomous-blueprint
+        run: bash scripts/collect_external_release_evidence.sh
+      - name: Run strict release gate
+        shell: bash
+        env:
+          GENESIS_AUTONOMOUS_MODE: release
+          GENESIS_REQUIRE_REAL_PLATFORM_MATRIX: "1"
+          GENESIS_REQUIRE_RELEASE_PACKAGING: "1"
+          GENESIS_RELEASE_SIGNING_DIR: ${{ github.workspace }}/.genesis-state/autonomous-blueprint/release-signing
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+          LAZARUS_LM_ENDPOINT: ${{ secrets.LAZARUS_LM_ENDPOINT }}
+          LAZARUS_LM_MODEL: ${{ secrets.LAZARUS_LM_MODEL }}
+          LAZARUS_ORACLE_PROTOCOL: ${{ vars.LAZARUS_ORACLE_PROTOCOL || 'openai_chat' }}
+          LAZARUS_ORACLE_API_KEY: ${{ secrets.LAZARUS_ORACLE_API_KEY }}
+          LAZARUS_ORACLE_TIMEOUT_MS: "120000"
+          LAZARUS_STRESS_ITERATIONS: "100"
+        run: |
+          test -n "$NVD_API_KEY" || { echo "NVD_API_KEY is required" >&2; exit 2; }
+          test -n "$LAZARUS_LM_ENDPOINT" || { echo "LAZARUS_LM_ENDPOINT is required" >&2; exit 2; }
+          test -n "$LAZARUS_LM_MODEL" || { echo "LAZARUS_LM_MODEL is required" >&2; exit 2; }
+          bash scripts/run_autonomous_blueprint.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: strict-release-evidence
+          path: |
+            .genesis-state/autonomous-blueprint
+            external-release-evidence-bundle
+          if-no-files-found: error

@@ -1,0 +1,7 @@
+self-hosted-runner:
+  labels:
+    - ios-device
+    - android-device
+    - release-signing
+
+config-variables: null
