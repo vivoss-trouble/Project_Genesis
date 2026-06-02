@@ -1,0 +1,208 @@
+name: Preflight External Evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref to preflight. Empty means the workflow ref."
+        required: false
+        default: ""
+
+jobs:
+  desktop-preflight:
+    name: Desktop preflight (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            kind: desktop_linux
+            runner: ubuntu-latest
+          - platform: windows
+            kind: desktop_windows
+            runner: windows-latest
+          - platform: macos
+            kind: desktop_macos
+            runner: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run desktop shell health
+        shell: bash
+        run: |
+          cargo run -q -p genesis-desktop-shell -- health > "$RUNNER_TEMP/desktop-health.json"
+          python3 -m json.tool "$RUNNER_TEMP/desktop-health.json" > /dev/null
+      - name: Record preflight evidence
+        shell: bash
+        env:
+          GENESIS_PREFLIGHT_KIND: ${{ matrix.kind }}
+          GENESIS_PREFLIGHT_LABEL: hosted-${{ matrix.platform }}-desktop-shell
+          GENESIS_PREFLIGHT_PROOF: ${{ runner.temp }}/desktop-health.json
+          GENESIS_PREFLIGHT_VERIFY_CMD: python3 -m json.tool "$GENESIS_PREFLIGHT_PROOF" > /dev/null
+          GENESIS_PREFLIGHT_OUT_DIR: ${{ github.workspace }}/preflight-external-evidence
+        run: bash scripts/record_preflight_external_evidence.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preflight-external-evidence-${{ matrix.kind }}
+          path: preflight-external-evidence
+          if-no-files-found: error
+
+  ios-simulator-preflight:
+    name: iOS simulator preflight
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - name: Check mobile control for iOS target
+        shell: bash
+        run: cargo check -p genesis-mobile-control --target aarch64-apple-ios
+      - name: Capture simulator proof
+        shell: bash
+        run: |
+          xcrun simctl list devices available > "$RUNNER_TEMP/ios-simulator-proof.txt"
+          test -s "$RUNNER_TEMP/ios-simulator-proof.txt"
+      - name: Record preflight evidence
+        shell: bash
+        env:
+          GENESIS_PREFLIGHT_KIND: ios_simulator
+          GENESIS_PREFLIGHT_LABEL: hosted-macos-ios-simulator
+          GENESIS_PREFLIGHT_PROOF: ${{ runner.temp }}/ios-simulator-proof.txt
+          GENESIS_PREFLIGHT_VERIFY_CMD: test -s "$GENESIS_PREFLIGHT_PROOF"
+          GENESIS_PREFLIGHT_OUT_DIR: ${{ github.workspace }}/preflight-external-evidence
+        run: bash scripts/record_preflight_external_evidence.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preflight-external-evidence-ios_simulator
+          path: preflight-external-evidence
+          if-no-files-found: error
+
+  android-emulator-preflight:
+    name: Android emulator preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run mobile control host smoke
+        shell: bash
+        run: cargo test -p genesis-mobile-control mobile_control_smoke_proves_remote_only_health_action_and_evidence
+      - name: Capture emulator proof
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          script: |
+            adb shell getprop ro.build.version.release > "$RUNNER_TEMP/android-emulator-proof.txt"
+            adb shell getprop ro.product.model >> "$RUNNER_TEMP/android-emulator-proof.txt"
+            test -s "$RUNNER_TEMP/android-emulator-proof.txt"
+      - name: Record preflight evidence
+        shell: bash
+        env:
+          GENESIS_PREFLIGHT_KIND: android_emulator
+          GENESIS_PREFLIGHT_LABEL: hosted-linux-android-emulator
+          GENESIS_PREFLIGHT_PROOF: ${{ runner.temp }}/android-emulator-proof.txt
+          GENESIS_PREFLIGHT_VERIFY_CMD: test -s "$GENESIS_PREFLIGHT_PROOF"
+          GENESIS_PREFLIGHT_OUT_DIR: ${{ github.workspace }}/preflight-external-evidence
+        run: bash scripts/record_preflight_external_evidence.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preflight-external-evidence-android_emulator
+          path: preflight-external-evidence
+          if-no-files-found: error
+
+  self-signed-artifact-preflight:
+    name: Self-signed artifact preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build desktop shell artifact
+        shell: bash
+        run: cargo build --release -p genesis-desktop-shell
+      - name: Self-sign and verify artifact digest
+        shell: bash
+        run: |
+          artifact="target/release/genesis-desktop-shell"
+          openssl req \
+            -x509 \
+            -newkey rsa:2048 \
+            -nodes \
+            -keyout "$RUNNER_TEMP/preflight.key" \
+            -out "$RUNNER_TEMP/preflight.crt" \
+            -subj "/CN=Genesis Preflight Self Signed/" \
+            -days 1
+          openssl dgst -sha256 -sign "$RUNNER_TEMP/preflight.key" -out "$RUNNER_TEMP/preflight.sig" "$artifact"
+          openssl x509 -in "$RUNNER_TEMP/preflight.crt" -pubkey -noout > "$RUNNER_TEMP/preflight.pub"
+          openssl dgst -sha256 -verify "$RUNNER_TEMP/preflight.pub" -signature "$RUNNER_TEMP/preflight.sig" "$artifact"
+          {
+            echo "artifact=$artifact"
+            sha256sum "$artifact"
+            sha256sum "$RUNNER_TEMP/preflight.crt"
+            sha256sum "$RUNNER_TEMP/preflight.sig"
+          } > "$RUNNER_TEMP/self-signed-artifact-proof.txt"
+      - name: Record preflight evidence
+        shell: bash
+        env:
+          GENESIS_PREFLIGHT_KIND: self_signed_artifact
+          GENESIS_PREFLIGHT_LABEL: hosted-linux-self-signed-digest
+          GENESIS_PREFLIGHT_ARTIFACT: ${{ github.workspace }}/target/release/genesis-desktop-shell
+          GENESIS_PREFLIGHT_PROOF: ${{ runner.temp }}/self-signed-artifact-proof.txt
+          GENESIS_PREFLIGHT_VERIFY_CMD: test -s "$GENESIS_PREFLIGHT_PROOF" && test -s "$GENESIS_PREFLIGHT_ARTIFACT"
+          GENESIS_PREFLIGHT_OUT_DIR: ${{ github.workspace }}/preflight-external-evidence
+        run: bash scripts/record_preflight_external_evidence.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preflight-external-evidence-self_signed_artifact
+          path: preflight-external-evidence
+          if-no-files-found: error
+
+  preflight-summary:
+    name: Preflight evidence summary
+    needs:
+      - desktop-preflight
+      - ios-simulator-preflight
+      - android-emulator-preflight
+      - self-signed-artifact-preflight
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref || github.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: preflight-external-evidence-*
+          path: downloaded-preflight-external-evidence
+      - name: Collect preflight evidence
+        shell: bash
+        run: |
+          mkdir -p preflight-external-evidence
+          find downloaded-preflight-external-evidence -path '*/preflight-external-evidence/*.json' -exec cp {} preflight-external-evidence/ \;
+          find preflight-external-evidence -type f -name '*.json' -print | sort
+      - name: Validate preflight evidence
+        shell: bash
+        env:
+          GENESIS_PREFLIGHT_OUT_DIR: ${{ github.workspace }}/preflight-external-evidence
+          GENESIS_REQUIRE_PREFLIGHT_EXTERNAL_EVIDENCE: "1"
+        run: bash scripts/validate_preflight_external_evidence.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preflight-external-evidence-summary
+          path: preflight-external-evidence
+          if-no-files-found: error
