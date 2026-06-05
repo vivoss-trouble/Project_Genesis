@@ -1,6 +1,11 @@
 name: External Release Evidence
 
 on:
+  push:
+    branches:
+      - ci-bridge-test
+    paths:
+      - ".github/workflows/external-release-evidence.yml"
   workflow_dispatch:
     inputs:
       git_ref:
