@@ -51,6 +51,8 @@ if manifest.get("git_head") != git_head:
     raise SystemExit(
         f"manifest git_head mismatch: expected={git_head} actual={manifest.get('git_head')}"
     )
+if manifest.get("git_dirty") is not False:
+    raise SystemExit("manifest git_dirty must be false")
 if manifest.get("real_host_smoke") is not True:
     raise SystemExit("manifest must set real_host_smoke=true")
 if platform in desktop and manifest.get("smoke_kind") != "desktop_shell_health":

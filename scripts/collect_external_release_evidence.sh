@@ -18,11 +18,14 @@ fi
 mkdir -p "$SMOKE_DIR" "$SIGNING_DIR"
 
 if [[ -d "$BUNDLE_DIR/platform-smoke" ]]; then
-  while IFS= read -r -d '' manifest; do
-    GENESIS_PLATFORM_SMOKE_MANIFEST="$manifest" \
-    GENESIS_PLATFORM_SMOKE_DIR="$SMOKE_DIR" \
-      bash "$ROOT/scripts/import_platform_smoke_manifest.sh"
-  done < <(find "$BUNDLE_DIR/platform-smoke" -maxdepth 1 -name '*.json' -print0 | sort -z)
+  for platform in android ios linux macos windows; do
+    manifest="$BUNDLE_DIR/platform-smoke/$platform.json"
+    if [[ -f "$manifest" ]]; then
+      GENESIS_PLATFORM_SMOKE_MANIFEST="$manifest" \
+      GENESIS_PLATFORM_SMOKE_DIR="$SMOKE_DIR" \
+        bash "$ROOT/scripts/import_platform_smoke_manifest.sh"
+    fi
+  done
 fi
 
 if [[ -d "$BUNDLE_DIR/release-signing" ]]; then

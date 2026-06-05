@@ -57,6 +57,8 @@ if manifest.get("git_head") != git_head:
     raise SystemExit(
         f"manifest git_head mismatch: expected={git_head} actual={manifest.get('git_head')}"
     )
+if manifest.get("git_dirty") is not False:
+    raise SystemExit("manifest git_dirty must be false")
 if manifest.get("real_signing_evidence") is not True:
     raise SystemExit("manifest must set real_signing_evidence=true")
 if not isinstance(artifact, dict) or not artifact.get("sha256") or artifact.get("bytes", 0) <= 0:
