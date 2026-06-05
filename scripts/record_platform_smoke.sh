@@ -31,11 +31,16 @@ fi
 mkdir -p "$SMOKE_DIR"
 MANIFEST_PATH="$SMOKE_DIR/$PLATFORM_ID.json"
 HEALTH_PATH="$SMOKE_DIR/$PLATFORM_ID-desktop-shell-health.json"
+if [[ -n "$(git status --short)" ]]; then
+  BASE_GIT_DIRTY=true
+else
+  BASE_GIT_DIRTY=false
+fi
 
 write_failure_manifest() {
   local exit_code="$1"
   local reason="${2:-${CURRENT_STEP}_failed}"
-  python3 - "$MANIFEST_PATH" "$ROOT" "$PLATFORM_ID" "$exit_code" "$reason" "$CURRENT_STEP" <<'PY'
+  python3 - "$MANIFEST_PATH" "$ROOT" "$PLATFORM_ID" "$exit_code" "$reason" "$CURRENT_STEP" "$BASE_GIT_DIRTY" <<'PY'
 from pathlib import Path
 from datetime import datetime, timezone
 import json
@@ -48,6 +53,7 @@ platform = sys.argv[3]
 exit_code = int(sys.argv[4])
 reason = sys.argv[5]
 current_step = sys.argv[6]
+baseline_git_dirty = sys.argv[7] == "true"
 
 git_head = subprocess.run(
     ["git", "rev-parse", "HEAD"],
@@ -55,19 +61,13 @@ git_head = subprocess.run(
     capture_output=True,
     text=True,
 ).stdout.strip() or "unknown"
-dirty_paths = subprocess.run(
-    ["git", "status", "--short"],
-    cwd=root,
-    capture_output=True,
-    text=True,
-).stdout.splitlines()
 
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps({
     "schema_version": 1,
     "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     "git_head": git_head,
-    "git_dirty": bool(dirty_paths),
+    "git_dirty": baseline_git_dirty,
     "platform": platform,
     "status": "failed",
     "current_step": current_step,
@@ -86,7 +86,7 @@ echo "[platform_smoke] desktop shell health platform=$PLATFORM_ID"
 cargo run -q -p genesis-desktop-shell -- health > "$HEALTH_PATH"
 
 CURRENT_STEP="success_manifest"
-python3 - "$MANIFEST_PATH" "$ROOT" "$PLATFORM_ID" "$HEALTH_PATH" <<'PY'
+python3 - "$MANIFEST_PATH" "$ROOT" "$PLATFORM_ID" "$HEALTH_PATH" "$BASE_GIT_DIRTY" <<'PY'
 from pathlib import Path
 from datetime import datetime, timezone
 import hashlib
@@ -99,6 +99,7 @@ manifest_path = Path(sys.argv[1])
 root = Path(sys.argv[2])
 platform_id = sys.argv[3]
 health_path = Path(sys.argv[4])
+baseline_git_dirty = sys.argv[5] == "true"
 
 def run(args):
     return subprocess.run(
@@ -109,7 +110,6 @@ def run(args):
     )
 
 git_head = run(["git", "rev-parse", "HEAD"]).stdout.strip() or "unknown"
-dirty_paths = run(["git", "status", "--short"]).stdout.splitlines()
 rustc = run(["rustc", "-vV"]).stdout
 host_triple = ""
 for line in rustc.splitlines():
@@ -138,7 +138,7 @@ manifest_path.write_text(json.dumps({
     "schema_version": 1,
     "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     "git_head": git_head,
-    "git_dirty": bool(dirty_paths),
+    "git_dirty": baseline_git_dirty,
     "platform": platform_id,
     "status": "passed",
     "real_host_smoke": True,
